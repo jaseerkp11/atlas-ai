@@ -33,18 +33,38 @@ def _setup_logging(verbose: bool) -> None:
 
 
 def cmd_connect(_: argparse.Namespace) -> int:
+    from atlas.config import load_settings
     from atlas.execution.mt5_client import MT5Client
 
     client = MT5Client()
     ok = client.connect()
     info = client.account_info_dict()
+    settings = load_settings()
     print("=" * 50)
     print("ATLAS — Broker Connection")
     print("=" * 50)
-    print(f"Connected : {ok}")
-    for k, v in info.items():
-        print(f"{k.capitalize():10}: {v}")
-    print(f"Symbols   : {len(__import__('atlas.config', fromlist=['load_settings']).load_settings().symbols)} configured")
+    print(f"Connected   : {ok}")
+    print(f"Data source : {info.get('data_source', '?')}")
+    print(f"Order mode  : {info.get('order_mode', settings.mode)}")
+    for k in ("login", "name", "server", "balance", "equity", "leverage"):
+        if k in info:
+            print(f"{k.capitalize():12}: {info[k]}")
+    print(f"Symbols     : {len(settings.symbols)} configured")
+
+    if client.using_live_market_data:
+        for sym in ("XAUUSD", "EURUSD"):
+            if sym in settings.symbols:
+                bid, ask = client.current_price(sym)
+                print(f"Live {sym:7}: bid={bid:.5f} ask={ask:.5f}")
+        print()
+        print("OK — using LIVE market data from MT5.")
+        if settings.is_paper:
+            print("Orders stay PAPER (simulated) until you set ATLAS_MODE=LIVE.")
+    else:
+        print()
+        print("WARNING — SYNTHETIC data. Prices will NOT match the real market.")
+        print("Fix: open MetaTrader 5, log in, then set MT5_* in .env and re-run.")
+
     client.disconnect()
     return 0 if ok else 1
 
@@ -60,7 +80,10 @@ def cmd_scan(args: argparse.Namespace) -> int:
     client = MT5Client()
     client.connect()
     symbols = args.symbols or settings.symbols
-    print(f"Mode={settings.mode} | min_score={settings.gates.min_score} | min_rr={settings.gates.min_reward_risk}")
+    src = "MT5_LIVE_MARKET" if client.using_live_market_data else "SYNTHETIC_NOT_LIVE"
+    print(f"Mode={settings.mode} | data={src} | min_score={settings.gates.min_score} | min_rr={settings.gates.min_reward_risk}")
+    if not client.using_live_market_data:
+        print("WARNING: synthetic prices — connect MT5 for real market levels.\n")
     print()
     for symbol in symbols:
         frames = {

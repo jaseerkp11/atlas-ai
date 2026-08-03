@@ -50,7 +50,13 @@ def _tf_constant(name: str) -> int:
 
 
 class MT5Client:
-    """Unified broker interface for live MT5 and paper/simulation."""
+    """
+    Broker interface.
+
+    - PAPER + MT5 available: real live prices from the terminal, simulated orders only
+    - LIVE + MT5 available: real prices AND real order_send
+    - No MT5 / non-Windows: synthetic fallback (offline demos only — prices are NOT market)
+    """
 
     def __init__(self) -> None:
         self._connected = False
@@ -58,50 +64,89 @@ class MT5Client:
         self._paper_equity = self._paper_balance
         self._paper_positions: dict[str, dict[str, Any]] = {}
         self._use_real_mt5 = False
+        self._data_source = "none"  # "mt5" | "synthetic"
         self._last_rates: dict[tuple[str, str], pd.DataFrame] = {}
+
+    @property
+    def using_live_market_data(self) -> bool:
+        return self._use_real_mt5 and self._data_source == "mt5"
 
     # ── Connection ────────────────────────────────────────────────────────────
 
     def connect(self) -> bool:
+        """
+        Always prefer a real MT5 terminal connection for market data when possible.
+        ATLAS_MODE only controls whether orders are real (LIVE) or simulated (PAPER).
+        """
         settings = load_settings()
-        if settings.is_paper or not MT5_AVAILABLE or platform.system() != "Windows":
-            self._connected = True
-            self._use_real_mt5 = False
-            reason = []
-            if settings.is_paper:
-                reason.append("PAPER mode")
-            if not MT5_AVAILABLE:
-                reason.append("MetaTrader5 package unavailable")
-            if platform.system() != "Windows":
-                reason.append(f"OS={platform.system()} (MT5 terminal requires Windows)")
-            logger.info("MT5Client connected in simulation (%s)", ", ".join(reason) or "sim")
-            return True
 
+        if MT5_AVAILABLE and platform.system() == "Windows":
+            if self._connect_mt5_terminal(settings):
+                mode = "LIVE ORDERS" if settings.is_live else "PAPER ORDERS (no real sends)"
+                logger.info(
+                    "MT5 live market data OK | order mode=%s | login=%s balance=%s",
+                    mode,
+                    self.account_info_dict().get("login"),
+                    self.account_balance(),
+                )
+                return True
+            logger.error(
+                "Could not connect to MetaTrader 5 terminal. "
+                "Open MT5, log in, enable Algo Trading, check .env MT5_* values. "
+                "Falling back to SYNTHETIC data (prices will NOT match the live market)."
+            )
+
+        # Synthetic fallback — not live market
+        self._connected = True
+        self._use_real_mt5 = False
+        self._data_source = "synthetic"
+        reasons = []
+        if not MT5_AVAILABLE:
+            reasons.append("MetaTrader5 package missing")
+        if platform.system() != "Windows":
+            reasons.append(f"OS={platform.system()}")
+        reasons.append(f"order_mode={settings.mode}")
+        logger.warning(
+            "Using SYNTHETIC prices (%s). Gold/FX levels will look wrong vs the real market.",
+            ", ".join(reasons),
+        )
+        return True
+
+    def _connect_mt5_terminal(self, settings) -> bool:
         assert mt5 is not None
         kwargs: dict[str, Any] = {}
         if settings.mt5_path:
             kwargs["path"] = settings.mt5_path
         if settings.mt5_login and settings.mt5_password and settings.mt5_server:
             kwargs.update(
-                login=settings.mt5_login,
+                login=int(settings.mt5_login),
                 password=settings.mt5_password,
                 server=settings.mt5_server,
             )
         ok = mt5.initialize(**kwargs) if kwargs else mt5.initialize()
         if not ok:
-            logger.error("MT5 initialize failed: %s", mt5.last_error())
+            logger.error("mt5.initialize failed: %s", mt5.last_error())
             self._connected = False
             self._use_real_mt5 = False
+            self._data_source = "none"
             return False
+
+        info = mt5.account_info()
+        if info is None:
+            logger.error("MT5 initialized but account_info() is None: %s", mt5.last_error())
+            mt5.shutdown()
+            return False
+
+        # Ensure configured symbols are visible in Market Watch
+        for symbol in settings.symbols:
+            mt5.symbol_select(symbol, True)
+
         self._connected = True
         self._use_real_mt5 = True
-        info = mt5.account_info()
-        logger.info(
-            "MT5 connected: login=%s server=%s balance=%s",
-            getattr(info, "login", "?"),
-            getattr(info, "server", "?"),
-            getattr(info, "balance", "?"),
-        )
+        self._data_source = "mt5"
+        # Sync paper accounting to the real account balance for realistic sizing
+        self._paper_balance = float(info.balance)
+        self._paper_equity = float(info.equity)
         return True
 
     def disconnect(self) -> None:
@@ -120,23 +165,26 @@ class MT5Client:
     def account_balance(self) -> float:
         if self._use_real_mt5 and mt5 is not None:
             info = mt5.account_info()
-            return float(info.balance) if info else 0.0
+            if info:
+                return float(info.balance)
         return self._paper_balance
 
     def account_equity(self) -> float:
         if self._use_real_mt5 and mt5 is not None:
             info = mt5.account_info()
-            return float(info.equity) if info else 0.0
+            if info:
+                return float(info.equity)
         return self._paper_equity
 
     def account_free_margin(self) -> float:
         if self._use_real_mt5 and mt5 is not None:
             info = mt5.account_info()
-            return float(info.margin_free) if info else 0.0
-        # Paper: free margin ≈ equity minus notional haircut
+            if info:
+                return float(info.margin_free)
         return max(0.0, self._paper_equity * 0.9)
 
     def account_info_dict(self) -> dict[str, Any]:
+        settings = load_settings()
         if self._use_real_mt5 and mt5 is not None:
             info = mt5.account_info()
             if info is None:
@@ -148,14 +196,18 @@ class MT5Client:
                 "balance": info.balance,
                 "equity": info.equity,
                 "leverage": info.leverage,
+                "data_source": "MT5_LIVE_MARKET",
+                "order_mode": settings.mode,
             }
         return {
             "login": 0,
-            "name": "PAPER",
-            "server": "SIMULATION",
+            "name": "SYNTHETIC",
+            "server": "OFFLINE_SIM",
             "balance": self._paper_balance,
             "equity": self._paper_equity,
             "leverage": 100,
+            "data_source": "SYNTHETIC_NOT_LIVE",
+            "order_mode": settings.mode,
         }
 
     # ── Symbols / quotes ──────────────────────────────────────────────────────
@@ -256,6 +308,7 @@ class MT5Client:
     def copy_rates(self, symbol: str, timeframe: str, bars: int = 500) -> pd.DataFrame:
         timeframe = timeframe.upper()
         if self._use_real_mt5 and mt5 is not None:
+            mt5.symbol_select(symbol, True)
             rates = mt5.copy_rates_from_pos(symbol, _tf_constant(timeframe), 0, bars)
             if rates is None:
                 logger.warning("No rates for %s %s: %s", symbol, timeframe, mt5.last_error())
@@ -268,7 +321,7 @@ class MT5Client:
             self._last_rates[(symbol, timeframe)] = out
             return out
 
-        # Simulated / cached
+        # Simulated / cached — NOT live market
         cached = self._last_rates.get((symbol, timeframe))
         if cached is not None and len(cached) >= min(bars, 100):
             return cached.tail(bars).reset_index(drop=True)
@@ -301,7 +354,9 @@ class MT5Client:
         target: float,
         comment: str = "ATLAS",
     ) -> dict[str, Any]:
-        if not self._use_real_mt5 or mt5 is None:
+        settings = load_settings()
+        # PAPER always simulates fills — even when MT5 live data is connected
+        if settings.is_paper or not self._use_real_mt5 or mt5 is None:
             bid, ask = self.current_price(symbol)
             fill = ask if direction == "LONG" else bid
             ticket = int(datetime.now(timezone.utc).timestamp())
@@ -321,11 +376,7 @@ class MT5Client:
         bid, ask = self.current_price(symbol)
         order_type = mt5.ORDER_TYPE_BUY if direction == "LONG" else mt5.ORDER_TYPE_SELL
         price = ask if direction == "LONG" else bid
-        info = mt5.symbol_info(symbol)
         filling = mt5.ORDER_FILLING_IOC
-        if info is not None:
-            # Prefer FOK/IOC/RETURN based on symbol filling mode bitmask
-            filling = mt5.ORDER_FILLING_IOC
 
         request = {
             "action": mt5.TRADE_ACTION_DEAL,
