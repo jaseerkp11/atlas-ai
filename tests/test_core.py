@@ -270,3 +270,17 @@ def test_sr_map_builds_from_frames():
     assert sr.mid == mid
     lines = sr.chart_lines()
     assert any("SUP" in x or "RES" in x or "S/R" in x for x in lines)
+
+
+def test_watch_never_emits_on_startup_prev_none():
+    from atlas.live.watch import should_emit_on_closed_m5, last_closed_m5_key
+
+    # The bug: first observation must NOT count as a new close
+    assert should_emit_on_closed_m5(None, "2024-01-01 12:00") is False
+    assert should_emit_on_closed_m5("2024-01-01 12:00", "2024-01-01 12:00") is False
+    assert should_emit_on_closed_m5("2024-01-01 12:00", "2024-01-01 12:05") is True
+
+    times = pd.date_range("2024-01-01", periods=10, freq="5min", tz="UTC")
+    df = pd.DataFrame({"time": times, "open": 1.0, "high": 1.1, "low": 0.9, "close": 1.0})
+    # last closed is second-to-last, not forming last
+    assert last_closed_m5_key(df) == str(pd.Timestamp(times[-2]))

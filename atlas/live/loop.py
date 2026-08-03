@@ -1,8 +1,7 @@
 """
-Real-time evaluation loop.
+Real-time M5 evaluation loop (auto path).
 
-Re-evaluates on each new M5 candle close, logs full reasoning every time
-(trade or no trade), and only auto-executes when every check passes.
+Uses last CLOSED M5 only — same rule as watch mode (no mid-candle startup flood).
 """
 
 from __future__ import annotations
@@ -19,6 +18,7 @@ from atlas.config import load_settings
 from atlas.execution.engine import ExecutionEngine
 from atlas.execution.mt5_client import MT5Client
 from atlas.journal.trade_journal import TradeJournal
+from atlas.live.watch import last_closed_m5_key, should_emit_on_closed_m5
 from atlas.risk.position import ConcurrentTradeGuard, DailyRiskState
 from atlas.scoring.engine import evaluate_setup
 
@@ -45,7 +45,7 @@ class LiveLoop:
             concurrent=self.concurrent,
             on_log=self.on_log,
         )
-        self._last_m5_time: dict[str, pd.Timestamp] = {}
+        self._last_closed_m5: dict[str, str] = {}
         self._running = False
 
     def start(self, max_iterations: int | None = None) -> None:
@@ -54,20 +54,17 @@ class LiveLoop:
             self.on_log("FATAL: could not connect broker — loop not started")
             return
 
-        mode = settings.mode
         self.on_log(
-            f"ATLAS live loop started | mode={mode} | "
+            f"ATLAS live loop | mode={settings.mode} | "
             f"min_score={settings.gates.min_score} | "
-            f"min_rr={settings.gates.min_reward_risk} | "
-            f"symbols={settings.symbols}"
+            f"trigger=NEW closed M5 only"
         )
-        if mode == "LIVE":
-            self.on_log(
-                "⚠ LIVE MODE — real orders will be sent when all checks pass. "
-                "No win-rate guarantee. Risk controls are enforced."
-            )
-        else:
-            self.on_log("PAPER mode — no real orders. Pending fills simulated on price touch.")
+        for symbol in settings.symbols:
+            m5 = self.broker.copy_rates(symbol, "M5", 100)
+            key = last_closed_m5_key(m5)
+            if key:
+                self._last_closed_m5[symbol] = key
+        self.on_log("Seeded closed M5 baselines (no trades on startup).")
 
         self._running = True
         iterations = 0
@@ -101,8 +98,6 @@ class LiveLoop:
                 self.on_log(f"Error on {symbol}: {exc}")
 
     def _process_symbol(self, symbol: str) -> None:
-        settings = load_settings()
-        # Fetch multi-TF data
         frames = {
             "M5": self.broker.copy_rates(symbol, "M5", 400),
             "M15": self.broker.copy_rates(symbol, "M15", 300),
@@ -114,23 +109,24 @@ class LiveLoop:
             self.on_log(f"{symbol}: insufficient M5 data")
             return
 
-        last_time = pd.Timestamp(m5["time"].iloc[-1])
-        prev = self._last_m5_time.get(symbol)
-        # Manage open/pending every tick using latest bar
         bar = m5.iloc[-1]
         self.engine.update_market(
             symbol=symbol,
             bar_high=float(bar["high"]),
             bar_low=float(bar["low"]),
             bar_close=float(bar["close"]),
-            bar_time=last_time.to_pydatetime(),
+            bar_time=pd.Timestamp(bar["time"]).to_pydatetime(),
         )
 
-        # Only re-score on NEW M5 candle close
-        if prev is not None and last_time <= prev:
+        key = last_closed_m5_key(m5)
+        prev = self._last_closed_m5.get(symbol)
+        if not should_emit_on_closed_m5(prev, key):
+            if key and prev is None:
+                self._last_closed_m5[symbol] = key
             return
-        self._last_m5_time[symbol] = last_time
-        self.on_log(f"{symbol}: new M5 close @ {last_time} close={float(bar['close']):.5f}")
+
+        self._last_closed_m5[symbol] = key  # type: ignore[index]
+        self.on_log(f"{symbol}: new CLOSED M5 @ {key}")
 
         if any(t.symbol == symbol for t in self.engine.pending + self.engine.open_trades):
             self.on_log(f"{symbol}: skip — existing pending/open trade")
@@ -138,15 +134,13 @@ class LiveLoop:
 
         features = detect_setup(symbol, frames)
         if features is None:
-            self.on_log(f"{symbol}: NO TRADE — could not build setup features (data)")
+            self.on_log(f"{symbol}: NO TRADE — could not build setup features")
             return
 
-        # Print timeframe summaries
         for tf_name in ("H4", "H1", "M15", "M5"):
             tf = getattr(features, tf_name.lower(), None)
             if tf:
                 self.on_log(f"  {tf.summary}")
 
         decision = evaluate_setup(features)
-        # try_execute logs reasoning and blocks if validation fails
         self.engine.try_execute(decision)
