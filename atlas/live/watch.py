@@ -125,6 +125,9 @@ def format_watch_card(
         f"║  Closed M5    : {closed_m5}",
         "╠" + "═" * 62 + "╣",
         f"║  Live bid/ask : {bid:.5f} / {ask:.5f}",
+        f"║  VWAP         : {f.vwap:.5f}  (price {f.vwap_side or 'n/a'})"
+        + ("  NEAR-VWAP ZONE" if f.vwap_near else ""),
+        f"║  VWAP status  : {'ALIGNED' if f.vwap_aligned else 'NOT ALIGNED'}",
         f"║  Entry        : {f.entry:.5f}",
         f"║  Stop         : {f.stop:.5f}",
         f"║  Target       : {f.target:.5f}",

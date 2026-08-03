@@ -162,7 +162,7 @@ def test_score_reasoning_always_present():
     score = score_setup(features)
     assert score.total >= 0
     assert score.plain_language
-    assert len(score.factors) == 8
+    assert len(score.factors) == 9
     decision = evaluate_setup(features)
     text = decision.reasoning_text()
     assert "Score:" in text
@@ -284,3 +284,28 @@ def test_watch_never_emits_on_startup_prev_none():
     df = pd.DataFrame({"time": times, "open": 1.0, "high": 1.1, "low": 0.9, "close": 1.0})
     # last closed is second-to-last, not forming last
     assert last_closed_m5_key(df) == str(pd.Timestamp(times[-2]))
+
+
+def test_vwap_computes_and_aligns():
+    from atlas.analysis.vwap import compute_vwap_series, evaluate_vwap
+    from atlas.models import Direction
+
+    n = 80
+    times = pd.date_range("2024-01-01", periods=n, freq="15min", tz="UTC")
+    close = np.linspace(1.10, 1.12, n)
+    df = pd.DataFrame(
+        {
+            "time": times,
+            "open": close,
+            "high": close + 0.0003,
+            "low": close - 0.0003,
+            "close": close,
+            "volume": np.full(n, 1000),
+        }
+    )
+    series = compute_vwap_series(df)
+    assert len(series) == n
+    assert float(series.iloc[-1]) > 0
+    reading = evaluate_vwap(df, Direction.LONG, atr=0.001)
+    assert reading.value > 0
+    assert "VWAP=" in reading.summary

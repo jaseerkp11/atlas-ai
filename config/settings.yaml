@@ -35,11 +35,12 @@ scoring_weights:
   h4_regime_alignment: 15
   h1_trend_confirmation: 15
   structure_break: 15
-  liquidity_sweep: 15
+  liquidity_sweep: 12
   fair_value_gap: 10
   order_block: 10
-  m5_trigger: 15
+  m5_trigger: 13
   volatility_context: 5
+  vwap_alignment: 5
 
 risk:
   risk_percent: 0.4
@@ -75,7 +76,9 @@ analysis:
   watch_signal_timeframe: M5
   watch_interval_seconds: 10
   scalp_market_entry: true
-  use_closed_m5_only: true   # detect on last CLOSED M5, not the forming candle
+  use_closed_m5_only: true
+  vwap_session_reset: true     # reset VWAP each UTC day
+  vwap_near_atr_mult: 0.5      # "near VWAP" entry zone = 0.5 × ATR
 
 backtest:
   initial_balance: 10000.0

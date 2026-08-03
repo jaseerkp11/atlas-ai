@@ -22,6 +22,7 @@ from atlas.analysis.structure import (
 )
 from atlas.analysis.timeframes import aligned_bias, analyze_all_timeframes
 from atlas.analysis.volatility import is_volatility_expanding, latest_atr
+from atlas.analysis.vwap import evaluate_vwap
 from atlas.config import load_settings
 from atlas.models import Direction, SetupFeatures
 
@@ -189,6 +190,18 @@ def detect_setup(
         vol_df = vol_df.iloc[:-1]
     vol_expanding = is_volatility_expanding(vol_df, period=atr_period)
 
+    # VWAP from M15 session (fallback M5) — challenge entry anchor
+    vwap_df = m15 if m15 is not None and len(m15) >= 20 else m5
+    if vwap_df is not None and len(vwap_df) > 20:
+        vwap_df = vwap_df.iloc[:-1].reset_index(drop=True)
+    vwap_read = evaluate_vwap(
+        vwap_df if vwap_df is not None else m5,
+        direction,
+        atr=atr_val,
+        near_atr_mult=float(settings.analysis.get("vwap_near_atr_mult", 0.5)),
+        session_reset=bool(settings.analysis.get("vwap_session_reset", True)),
+    )
+
     entry, stop, target, rr = _compute_levels(
         direction=direction,
         m5=m5,
@@ -230,6 +243,11 @@ def detect_setup(
         m5_trigger=m5_trigger,
         atr=atr_val,
         volatility_expanding=vol_expanding,
+        vwap=vwap_read.value,
+        vwap_side=vwap_read.side,
+        vwap_aligned=vwap_read.aligned,
+        vwap_near=vwap_read.near_vwap,
+        vwap_summary=vwap_read.summary,
         entry=entry,
         stop=stop,
         target=target,

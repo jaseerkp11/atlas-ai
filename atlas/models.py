@@ -112,6 +112,11 @@ class SetupFeatures:
     m5_trigger: bool = False
     atr: float = 0.0
     volatility_expanding: bool = False
+    vwap: float = 0.0
+    vwap_side: str = ""          # above | below | at
+    vwap_aligned: bool = False
+    vwap_near: bool = False
+    vwap_summary: str = ""
     entry: float = 0.0
     stop: float = 0.0
     target: float = 0.0

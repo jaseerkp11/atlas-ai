@@ -58,6 +58,7 @@ class ScoringWeights:
     order_block: int
     m5_trigger: int
     volatility_context: int
+    vwap_alignment: int
 
     def total(self) -> int:
         return (
@@ -69,6 +70,7 @@ class ScoringWeights:
             + self.order_block
             + self.m5_trigger
             + self.volatility_context
+            + self.vwap_alignment
         )
 
     def validate(self) -> None:

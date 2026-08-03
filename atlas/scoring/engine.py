@@ -34,6 +34,7 @@ def score_setup(features: SetupFeatures) -> ScoreResult:
     factors.append(_score_order_block(features, weights))
     factors.append(_score_m5_trigger(features, weights))
     factors.append(_score_volatility(features, weights))
+    factors.append(_score_vwap(features, weights))
 
     total = sum(f.earned for f in factors)
     passed = [f.name for f in factors if f.passed]
@@ -255,7 +256,6 @@ def _score_volatility(features: SetupFeatures, w: ScoringWeights) -> ScoreFactor
         return ScoreFactor(
             name, weight, weight, True, f"ATR expanding (ATR={features.atr:.5f})"
         )
-    # Partial credit if ATR exists but not expanding — still usable for stops
     earned = max(1, weight // 2)
     return ScoreFactor(
         name,
@@ -263,4 +263,47 @@ def _score_volatility(features: SetupFeatures, w: ScoringWeights) -> ScoreFactor
         earned,
         True,
         f"ATR available ({features.atr:.5f}) but not expanding — partial credit {earned}/{weight}",
+    )
+
+
+def _score_vwap(features: SetupFeatures, w: ScoringWeights) -> ScoreFactor:
+    name = "VWAP alignment"
+    weight = w.vwap_alignment
+    if features.vwap <= 0:
+        return ScoreFactor(name, weight, 0, False, "VWAP unavailable")
+    if features.direction == Direction.NEUTRAL:
+        return ScoreFactor(name, weight, 0, False, "No direction to align with VWAP")
+
+    if features.vwap_aligned and features.vwap_near:
+        return ScoreFactor(
+            name,
+            weight,
+            weight,
+            True,
+            f"Near-VWAP challenge entry — {features.vwap_summary}",
+        )
+    if features.vwap_aligned:
+        return ScoreFactor(
+            name,
+            weight,
+            weight,
+            True,
+            f"Price {features.vwap_side} VWAP in trade direction — {features.vwap_summary}",
+        )
+    # Partial if close to VWAP but not yet aligned
+    if features.vwap_near:
+        earned = max(1, weight // 2)
+        return ScoreFactor(
+            name,
+            weight,
+            earned,
+            False,
+            f"Near VWAP but not aligned yet — {features.vwap_summary}",
+        )
+    return ScoreFactor(
+        name,
+        weight,
+        0,
+        False,
+        f"Price {features.vwap_side} VWAP against setup — {features.vwap_summary}",
     )
