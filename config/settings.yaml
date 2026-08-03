@@ -1,7 +1,7 @@
-# ATLAS — Scalp / Challenge account profile
-# Gates live ONLY here. No win-rate claims — consistency + risk control.
+# ATLAS — Live scalp / challenge profile
+# Structure from H1 + M15 (real strategy context). Entry trigger on M5 close.
 
-mode: LIVE  # PAPER | LIVE
+mode: LIVE
 
 profile: scalp_challenge
 
@@ -20,16 +20,16 @@ symbols:
   - CADJPY
   - XAUUSD
 
-# Scalp stack: H4/H1 bias, M5 setup + entry (updates every M5 close)
+# Top-down: H4 bias → H1 trend → M15 setup zones → M5 entry trigger
 timeframes:
   regime: H4
   trend: H1
-  setup: M5
+  setup: M15
   entry: M5
 
 gates:
   min_score: 75
-  min_reward_risk: 3.0   # 1:3
+  min_reward_risk: 3.0
 
 scoring_weights:
   h4_regime_alignment: 15
@@ -41,12 +41,11 @@ scoring_weights:
   m5_trigger: 15
   volatility_context: 5
 
-# Challenge-account friendly risk (small per-trade risk, hard daily stop)
 risk:
   risk_percent: 0.4
   atr_period: 14
-  atr_stop_multiplier: 1.0    # tighter scalp stop
-  atr_target_multiplier: 3.0  # aligns with ~1:3
+  atr_stop_multiplier: 1.0
+  atr_target_multiplier: 3.0
   max_concurrent_trades: 2
   daily_loss_limit_percent: 2.0
   max_spread_pips:
@@ -60,22 +59,23 @@ risk:
 sessions:
   london: [7, 16]
   new_york: [12, 21]
-  # Inclusive start / exclusive end — cover full London+NY (DST-aware buffer)
   allowed_hours_utc: [7, 23]
 
 analysis:
   swing_lookback: 4
   structure_lookback: 50
-  fvg_lookback: 24              # only search recent M5 bars (~2h)
-  order_block_lookback: 24
-  liquidity_lookback: 20
+  # M15 lookbacks (~ recent session, not days-old junk)
+  fvg_lookback: 40
+  order_block_lookback: 40
+  liquidity_lookback: 30
   equal_level_tolerance_atr: 0.15
-  structure_max_age_bars: 24   # ignore FVG/OB older than this many setup bars
-  structure_proximity_atr: 3.0 # ignore FVG/OB farther than 3×ATR from live price
+  structure_max_age_bars: 40
+  structure_proximity_atr: 4.0
+  sr_proximity_atr: 6.0
   watch_signal_timeframe: M5
   watch_interval_seconds: 10
   scalp_market_entry: true
-  sr_proximity_atr: 8.0        # only show S/R near price on watch cards
+  use_closed_m5_only: true   # detect on last CLOSED M5, not the forming candle
 
 backtest:
   initial_balance: 10000.0

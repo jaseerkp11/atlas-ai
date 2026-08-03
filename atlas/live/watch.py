@@ -1,8 +1,9 @@
 """
-Watch mode — updates on each NEW M5 candle close (scalp / challenge).
+Live watch loop — continuously pulls MT5 ticks/rates.
 
-"watch poll" lines = heartbeat only (waiting for next M5 close).
-Full signal cards print only when a new M5 bar appears in MT5.
+- Heartbeat every few seconds shows LIVE bid/ask (proves market feed is alive)
+- Full signal cards fire when a NEW *closed* M5 candle appears
+- Structure (FVG / OB / BOS / S/R) from H1 + M15; entry trigger on M5
 """
 
 from __future__ import annotations
@@ -48,7 +49,6 @@ SIGNAL_FIELDS = [
 
 
 def _bar_key(ts) -> str:
-    """Normalize bar time so equality checks are reliable across dtypes."""
     return str(pd.Timestamp(ts))
 
 
@@ -58,8 +58,7 @@ def _next_m5_close_utc(now: datetime | None = None) -> datetime:
         now = now.replace(tzinfo=timezone.utc)
     minute = (now.minute // 5) * 5
     base = now.replace(minute=minute, second=0, microsecond=0)
-    nxt = base + timedelta(minutes=5)
-    return nxt
+    return base + timedelta(minutes=5)
 
 
 class SignalJournal:
@@ -83,20 +82,22 @@ def format_watch_card(
     bid: float,
     ask: float,
     execute_armed: bool,
+    closed_m5: str,
 ) -> str:
     f = decision.features
-    action = "SCALP WATCH — mark near S/R on chart"
+    action = "WATCH — H1/M15 zones + M5 trigger"
     if decision.allowed:
-        action = "SCALP SETUP QUALIFIED"
+        action = "SETUP QUALIFIED"
         if execute_armed:
-            action = "SCALP EXECUTE (gates passed)"
+            action = "EXECUTE (gates passed)"
 
     lines = [
         "",
         "╔" + "═" * 62 + "╗",
-        f"║  M5 SCALP  {decision.symbol:8}  {decision.direction.value:6}  "
+        f"║  LIVE  {decision.symbol:8}  {decision.direction.value:6}  "
         f"score={decision.score.total}/100  RR=1:{f.reward_risk:.2f}",
         f"║  {action}",
+        f"║  Closed M5 bar : {closed_m5}",
         "╠" + "═" * 62 + "╣",
         f"║  Live bid/ask : {bid:.5f} / {ask:.5f}",
         f"║  Entry        : {f.entry:.5f}",
@@ -111,16 +112,16 @@ def format_watch_card(
         lines.append(
             f"║  Resistance   : {sr.nearest_resistance.price:.5f}  ({sr.nearest_resistance.strength})"
         )
-    lines.append("║  Near S/R (draw these — stale far levels hidden):")
-    shown = (sr.resistances[:3] + sr.supports[:3])
+    lines.append("║  Near S/R (H1/M15/M5 confluence):")
+    shown = sr.resistances[:3] + sr.supports[:3]
     if not shown:
-        lines.append("║    (none within proximity filter)")
+        lines.append("║    (none near price)")
     for lvl in shown:
         tag = "RES" if lvl.kind == "resistance" else "SUP"
         lines.append(
             f"║    {tag} {lvl.price:.5f}  [{'+'.join(lvl.timeframes)}] {lvl.strength}"
         )
-    lines.append("║  Why (fresh structure only — old filled FVG/OB ignored):")
+    lines.append("║  Why:")
     for factor in decision.score.factors:
         mark = "✓" if factor.passed else "✗"
         lines.append(f"║    {mark} {factor.name}: {factor.reason}")
@@ -133,8 +134,6 @@ def format_watch_card(
 
 
 class WatchLoop:
-    """Re-scan on each new M5 candle close (~every 5 minutes)."""
-
     def __init__(
         self,
         broker: MT5Client | None = None,
@@ -145,7 +144,7 @@ class WatchLoop:
         self.execute = execute
         self.on_log = on_log or (lambda m: print(m, flush=True))
         self.signals = SignalJournal()
-        self._last_bar: dict[str, str] = {}
+        self._last_closed_m5: dict[str, str] = {}
         self._running = False
         self.engine: ExecutionEngine | None = None
         if execute:
@@ -163,32 +162,30 @@ class WatchLoop:
             self.on_log("FATAL: broker connect failed")
             return
 
-        signal_tf = "M5"  # forced for scalp watch — do not use M15
         interval = int(settings.analysis.get("watch_interval_seconds", 10))
-        self.on_log("=" * 60)
+        self.on_log("=" * 64)
+        self.on_log("ATLAS LIVE WATCH v3")
+        self.on_log("  Data     : continuous MT5 live ticks + OHLC refresh every poll")
+        self.on_log("  Structure: H1 + M15 (FVG, OB, BOS, S/R)")
+        self.on_log("  Trigger  : each NEW closed M5 candle")
         self.on_log(
-            f"M5 SCALP WATCH v2 | cards on each NEW M5 close | poll={interval}s"
+            f"  Gates    : score>={settings.gates.min_score}  RR=1:{settings.gates.min_reward_risk:g}  "
+            f"execute={self.execute}"
         )
         self.on_log(
-            f"min_score={settings.gates.min_score} | min_rr=1:{settings.gates.min_reward_risk:g} | "
-            f"execute={self.execute} | risk={settings.risk.risk_percent}% | "
-            f"data={'LIVE_MT5' if self.broker.using_live_market_data else 'SYNTHETIC'}"
+            f"  Feed     : {'MT5_LIVE_MARKET' if self.broker.using_live_market_data else 'SYNTHETIC'}"
         )
-        self.on_log(
-            "Heartbeat lines = waiting. Full cards appear only after a new 5m candle closes."
-        )
-        self.on_log(
-            "FVG/OB older than ~2h or far from price are ignored (fixes stale hours-old zones)."
-        )
-        if self.execute and settings.is_live:
-            self.on_log("EXECUTE + LIVE armed.")
-        self.on_log("=" * 60)
+        self.on_log("=" * 64)
+        if not self.broker.using_live_market_data:
+            self.on_log("ERROR: not on live MT5 feed — fix connection before trusting signals.")
 
         self._running = True
         cycles = 0
+        # First cycle: seed last-closed times WITHOUT trading (avoid flood), then wait for next close
+        self._cycle(seed_only=True)
         try:
             while self._running:
-                self._cycle(signal_tf)
+                self._cycle(seed_only=False)
                 cycles += 1
                 if max_cycles is not None and cycles >= max_cycles:
                     break
@@ -203,47 +200,70 @@ class WatchLoop:
     def stop(self) -> None:
         self._running = False
 
-    def _cycle(self, signal_tf: str) -> None:
+    def _cycle(self, seed_only: bool = False) -> None:
         settings = load_settings()
         now = datetime.now(timezone.utc)
         nxt = _next_m5_close_utc(now)
-        wait_s = max(0, int((nxt - now).total_seconds()))
+
+        # Prove live feed every poll
+        live_bits = []
+        for sym in ("XAUUSD", "EURUSD", "GBPUSD"):
+            if sym not in settings.symbols:
+                continue
+            snap = self.broker.live_tick_snapshot(sym)
+            if snap:
+                live_bits.append(f"{sym} {snap['bid']:.5f}/{snap['ask']:.5f}")
+            else:
+                bid, ask = self.broker.current_price(sym)
+                live_bits.append(f"{sym} {bid:.5f}/{ask:.5f}")
         self.on_log(
-            f"[{now.strftime('%H:%M:%S')} UTC] heartbeat — next M5 boundary ~{nxt.strftime('%H:%M')} UTC "
-            f"(in ~{wait_s}s). Waiting for NEW M5 bar from MT5…"
+            f"[{now.strftime('%H:%M:%S')} UTC] LIVE {' | '.join(live_bits)} "
+            f"| next M5 close ~{nxt.strftime('%H:%M')} UTC"
         )
 
         any_new = False
         for symbol in settings.symbols:
             try:
-                if self._process_symbol(symbol, signal_tf):
+                if self._process_symbol(symbol, seed_only=seed_only):
                     any_new = True
             except Exception as exc:
                 logger.exception(symbol)
                 self.on_log(f"Error {symbol}: {exc}")
-        if not any_new:
-            self.on_log("  (no new M5 closes yet — this is normal between candles)")
 
-    def _process_symbol(self, symbol: str, signal_tf: str) -> bool:
+        if seed_only:
+            self.on_log(
+                "Seeded last closed M5 times from live MT5. "
+                "Waiting for the NEXT M5 close to print full signal cards…"
+            )
+        elif not any_new:
+            self.on_log("  → no new closed M5 yet (normal between :00/:05/:10/:15…)")
+
+    def _process_symbol(self, symbol: str, seed_only: bool = False) -> bool:
+        # Always refresh from MT5 (no stale cache path when live)
         frames = {
             "M5": self.broker.copy_rates(symbol, "M5", 400),
             "M15": self.broker.copy_rates(symbol, "M15", 300),
             "H1": self.broker.copy_rates(symbol, "H1", 200),
             "H4": self.broker.copy_rates(symbol, "H4", 150),
         }
-        bar_df = frames.get(signal_tf)
-        if bar_df is None:
-            bar_df = frames.get("M5")
-        if bar_df is None or len(bar_df) < 40:
+        m5 = frames.get("M5")
+        if m5 is None or len(m5) < 40:
             return False
 
-        last_t = bar_df["time"].iloc[-1]
-        key = _bar_key(last_t)
-        prev = self._last_bar.get(symbol)
+        # CRITICAL: use last CLOSED candle (iloc[-2]), not the forming bar (iloc[-1])
+        closed_ts = m5["time"].iloc[-2]
+        key = _bar_key(closed_ts)
+        prev = self._last_closed_m5.get(symbol)
+
+        if seed_only:
+            self._last_closed_m5[symbol] = key
+            return False
+
         if prev is not None and key == prev:
             return False
-        self._last_bar[symbol] = key
-        self.on_log(f"\n>>> {symbol}: NEW M5 close @ {key}")
+
+        self._last_closed_m5[symbol] = key
+        self.on_log(f"\n>>> {symbol}: NEW closed M5 @ {key} (matches MT5/TV 5m close)")
 
         bid, ask = self.broker.current_price(symbol)
         mid = (bid + ask) / 2.0
@@ -251,19 +271,16 @@ class WatchLoop:
 
         features = detect_setup(symbol, frames)
         if features is None:
-            self.on_log(f"{symbol}: insufficient data for setup")
+            self.on_log(f"{symbol}: insufficient data")
             return True
 
         decision = evaluate_setup(features)
-        card = format_watch_card(decision, sr, bid, ask, execute_armed=bool(self.execute))
-        self.on_log(card)
-
-        watch_note = (
-            f"Draw SUP {sr.nearest_support.price:.5f} / "
-            f"RES {sr.nearest_resistance.price:.5f}"
-            if sr.nearest_support and sr.nearest_resistance
-            else "Mark near S/R"
+        self.on_log(
+            format_watch_card(
+                decision, sr, bid, ask, bool(self.execute), closed_m5=key
+            )
         )
+
         self.signals.log(
             {
                 "time_utc": datetime.now(timezone.utc).isoformat(),
@@ -280,12 +297,10 @@ class WatchLoop:
                 "bid": bid,
                 "ask": ask,
                 "reasoning": " | ".join(decision.score.plain_language),
-                "watch_note": watch_note,
+                "watch_note": f"closed_m5={key}",
             }
         )
 
         if self.execute and decision.allowed and self.engine is not None:
             self.engine.try_execute(decision)
-        elif decision.allowed:
-            self.on_log(f"→ {symbol}: qualifies (score {decision.score.total}).")
         return True

@@ -31,29 +31,39 @@ def detect_setup(
     frames: dict[str, pd.DataFrame],
 ) -> SetupFeatures | None:
     """
-    Build a SetupFeatures object for `symbol` from multi-TF OHLC frames.
-
-    Setup timeframe comes from config (scalp profile uses M5).
-    Always returns features when data allows so reasoning can be printed.
+    Real strategy stack:
+      H4/H1 = bias
+      M15    = setup zones (BOS/CHoCH, sweep, FVG, order block, S/R context)
+      M5     = entry trigger (uses last closed M5 bars, not the forming candle)
     """
     settings = load_settings()
     analyses = analyze_all_timeframes(frames)
     bias = aligned_bias(analyses)
 
-    setup_tf = str(settings.timeframes.get("setup", "M5")).upper()
+    # Setup zones from M15 (and fall back to M5 only if missing)
+    setup_tf = str(settings.timeframes.get("setup", "M15")).upper()
     setup_df = frames.get(setup_tf)
     if setup_df is None:
+        setup_df = frames.get("M15")
+    if setup_df is None:
         setup_df = frames.get("M5")
-    m5 = frames.get("M5")
-    m15 = frames.get("M15")
 
-    if setup_df is None or m5 is None or len(setup_df) < 30 or len(m5) < 30:
+    m5_raw = frames.get("M5")
+    m15 = frames.get("M15")
+    h1 = frames.get("H1")
+
+    if setup_df is None or m5_raw is None or len(setup_df) < 30 or len(m5_raw) < 30:
         return None
+
+    # Drop currently forming M5 candle so trigger/levels use closed market structure
+    m5 = m5_raw.iloc[:-1].reset_index(drop=True) if len(m5_raw) > 30 else m5_raw
+    # Prefer last closed M15 bar set too when setup is M15
+    if setup_tf == "M15" and len(setup_df) > 30:
+        setup_df = setup_df.iloc[:-1].reset_index(drop=True)
 
     swing_lb = int(settings.analysis["swing_lookback"])
     atr_period = int(settings.risk.atr_period)
 
-    # Structure on configured setup timeframe (M5 for scalp challenge)
     sh = find_swing_highs(setup_df, lookback=swing_lb)
     sl = find_swing_lows(setup_df, lookback=swing_lb)
     prior_trend = analyses["H1"].direction if "H1" in analyses else Direction.NEUTRAL
@@ -81,28 +91,28 @@ def detect_setup(
         lookback=int(settings.analysis["liquidity_lookback"]),
     )
 
-    fvgs = detect_fair_value_gaps(
+    # Primary zones on M15; also accept fresh near-price H1 zones (confluence)
+    fvgs_m15 = detect_fair_value_gaps(
         setup_df,
         lookback=int(settings.analysis["fvg_lookback"]),
         atr_value=atr_setup,
     )
-    obs = detect_order_blocks(
+    obs_m15 = detect_order_blocks(
         setup_df,
         lookback=int(settings.analysis["order_block_lookback"]),
         atr_value=atr_setup,
     )
 
-    if direction == Direction.NEUTRAL and sweep is not None:
-        direction = sweep.direction
-
     price_now = float(m5["close"].iloc[-1])
-    max_age = int(settings.analysis.get("structure_max_age_bars", 24))
-    prox = float(settings.analysis.get("structure_proximity_atr", 3.0))
+    max_age = int(settings.analysis.get("structure_max_age_bars", 40))
+    prox = float(settings.analysis.get("structure_proximity_atr", 4.0))
     cur_idx = len(setup_df) - 1
 
-    active_fvg = (
-        active_fvgs_for_direction(
-            fvgs,
+    active_fvg: list = []
+    active_ob: list = []
+    if direction != Direction.NEUTRAL:
+        active_fvg = active_fvgs_for_direction(
+            fvgs_m15,
             direction,
             price=price_now,
             atr=atr_val,
@@ -110,12 +120,8 @@ def detect_setup(
             current_index=cur_idx,
             max_distance_atr=prox,
         )
-        if direction != Direction.NEUTRAL
-        else []
-    )
-    active_ob = (
-        active_order_blocks(
-            obs,
+        active_ob = active_order_blocks(
+            obs_m15,
             direction,
             price=price_now,
             atr=atr_val,
@@ -123,12 +129,64 @@ def detect_setup(
             current_index=cur_idx,
             max_distance_atr=prox,
         )
-        if direction != Direction.NEUTRAL
-        else []
-    )
+        if h1 is not None and len(h1) >= 40:
+            h1_use = h1.iloc[:-1].reset_index(drop=True) if len(h1) > 40 else h1
+            atr_h1 = latest_atr(h1_use, period=atr_period)
+            h1_age = min(20, max_age)
+            active_fvg = active_fvg + active_fvgs_for_direction(
+                detect_fair_value_gaps(
+                    h1_use,
+                    lookback=min(24, int(settings.analysis["fvg_lookback"])),
+                    atr_value=atr_h1,
+                ),
+                direction,
+                price=price_now,
+                atr=atr_h1 if atr_h1 > 0 else atr_val,
+                max_age_bars=h1_age,
+                current_index=len(h1_use) - 1,
+                max_distance_atr=prox,
+            )
+            active_ob = active_ob + active_order_blocks(
+                detect_order_blocks(
+                    h1_use,
+                    lookback=min(24, int(settings.analysis["order_block_lookback"])),
+                    atr_value=atr_h1,
+                ),
+                direction,
+                price=price_now,
+                atr=atr_h1 if atr_h1 > 0 else atr_val,
+                max_age_bars=h1_age,
+                current_index=len(h1_use) - 1,
+                max_distance_atr=prox,
+            )
+
+    if direction == Direction.NEUTRAL and sweep is not None:
+        direction = sweep.direction
+        # re-filter if direction just became known
+        if direction != Direction.NEUTRAL and not active_fvg and not active_ob:
+            active_fvg = active_fvgs_for_direction(
+                fvgs_m15,
+                direction,
+                price=price_now,
+                atr=atr_val,
+                max_age_bars=max_age,
+                current_index=cur_idx,
+                max_distance_atr=prox,
+            )
+            active_ob = active_order_blocks(
+                obs_m15,
+                direction,
+                price=price_now,
+                atr=atr_val,
+                max_age_bars=max_age,
+                current_index=cur_idx,
+                max_distance_atr=prox,
+            )
 
     m5_trigger = _detect_m5_trigger(m5, direction, analyses.get("M5"))
     vol_df = m15 if m15 is not None and len(m15) >= 30 else setup_df
+    if vol_df is not None and len(vol_df) > 30:
+        vol_df = vol_df.iloc[:-1]
     vol_expanding = is_volatility_expanding(vol_df, period=atr_period)
 
     entry, stop, target, rr = _compute_levels(
