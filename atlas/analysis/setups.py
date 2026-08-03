@@ -33,32 +33,36 @@ def detect_setup(
     """
     Build a SetupFeatures object for `symbol` from multi-TF OHLC frames.
 
-    Returns None only when there is no usable directional bias at all
-    (caller still scores/rejects with reasoning when a setup object exists).
-    For transparency we always return a features object when M15/M5 data exist,
-    even if score will be low — so reasoning can be printed.
+    Setup timeframe comes from config (scalp profile uses M5).
+    Always returns features when data allows so reasoning can be printed.
     """
     settings = load_settings()
     analyses = analyze_all_timeframes(frames)
     bias = aligned_bias(analyses)
 
-    m15 = frames.get("M15")
+    setup_tf = str(settings.timeframes.get("setup", "M5")).upper()
+    setup_df = frames.get(setup_tf)
+    if setup_df is None:
+        setup_df = frames.get("M5")
     m5 = frames.get("M5")
-    if m15 is None or m5 is None or len(m15) < 30 or len(m5) < 30:
+    m15 = frames.get("M15")
+
+    if setup_df is None or m5 is None or len(setup_df) < 30 or len(m5) < 30:
         return None
 
     swing_lb = int(settings.analysis["swing_lookback"])
     atr_period = int(settings.risk.atr_period)
 
-    # Structure on setup timeframe (M15)
-    sh15 = find_swing_highs(m15, lookback=swing_lb)
-    sl15 = find_swing_lows(m15, lookback=swing_lb)
+    # Structure on configured setup timeframe (M5 for scalp challenge)
+    sh = find_swing_highs(setup_df, lookback=swing_lb)
+    sl = find_swing_lows(setup_df, lookback=swing_lb)
     prior_trend = analyses["H1"].direction if "H1" in analyses else Direction.NEUTRAL
 
-    bos_ok, bos_side = detect_bos(m15, sh15, sl15, direction_bias=bias if bias != Direction.NEUTRAL else None)
-    choch_ok, choch_side = detect_choch(m15, sh15, sl15, prior_trend=prior_trend)
+    bos_ok, bos_side = detect_bos(
+        setup_df, sh, sl, direction_bias=bias if bias != Direction.NEUTRAL else None
+    )
+    choch_ok, choch_side = detect_choch(setup_df, sh, sl, prior_trend=prior_trend)
 
-    # If no H4/H1 alignment, try to use structure-derived direction
     direction = bias
     if direction == Direction.NEUTRAL:
         if bos_side == "bullish" or choch_side == "bullish":
@@ -66,29 +70,28 @@ def detect_setup(
         elif bos_side == "bearish" or choch_side == "bearish":
             direction = Direction.SHORT
 
-    atr_m15 = latest_atr(m15, period=atr_period)
+    atr_setup = latest_atr(setup_df, period=atr_period)
     atr_m5 = latest_atr(m5, period=atr_period)
-    atr_val = atr_m5 if atr_m5 > 0 else atr_m15
+    atr_val = atr_m5 if atr_m5 > 0 else atr_setup
 
     sweep = detect_liquidity_sweep(
-        m15,
-        sh15,
-        sl15,
+        setup_df,
+        sh,
+        sl,
         lookback=int(settings.analysis["liquidity_lookback"]),
     )
 
     fvgs = detect_fair_value_gaps(
-        m15,
+        setup_df,
         lookback=int(settings.analysis["fvg_lookback"]),
-        atr_value=atr_m15,
+        atr_value=atr_setup,
     )
     obs = detect_order_blocks(
-        m15,
+        setup_df,
         lookback=int(settings.analysis["order_block_lookback"]),
-        atr_value=atr_m15,
+        atr_value=atr_setup,
     )
 
-    # Direction filter for features
     if direction == Direction.NEUTRAL and sweep is not None:
         direction = sweep.direction
 
@@ -96,7 +99,8 @@ def detect_setup(
     active_ob = active_order_blocks(obs, direction) if direction != Direction.NEUTRAL else []
 
     m5_trigger = _detect_m5_trigger(m5, direction, analyses.get("M5"))
-    vol_expanding = is_volatility_expanding(m15, period=atr_period)
+    vol_df = m15 if m15 is not None and len(m15) >= 30 else setup_df
+    vol_expanding = is_volatility_expanding(vol_df, period=atr_period)
 
     entry, stop, target, rr = _compute_levels(
         direction=direction,
@@ -105,11 +109,10 @@ def detect_setup(
         sweep=sweep,
         order_blocks=active_ob,
         fvgs=active_fvg,
-        swing_highs=sh15,
-        swing_lows=sl15,
+        swing_highs=sh,
+        swing_lows=sl,
     )
 
-    # Confirm BOS/CHoCH align with chosen direction
     bos_aligned = bool(
         bos_ok
         and (
@@ -184,24 +187,26 @@ def _compute_levels(
     stop_mult = settings.risk.atr_stop_multiplier
     tgt_mult = settings.risk.atr_target_multiplier
     price = float(m5["close"].iloc[-1])
+    scalp_entry = bool(settings.analysis.get("scalp_market_entry", False))
 
     if direction == Direction.NEUTRAL or atr <= 0:
         return price, price, price, 0.0
 
-    # Prefer entry at nearest unmitigated OB mid, else FVG mid, else slight pullback from close
+    # Scalp: enter near live price. Swing/OB/FVG still define stop context.
     entry = price
-    if order_blocks:
-        ob = order_blocks[-1]
-        entry = (ob.top + ob.bottom) / 2.0
-    elif fvgs:
-        g = fvgs[-1]
-        entry = (g.top + g.bottom) / 2.0
-    elif sweep is not None:
-        entry = sweep.level
+    if not scalp_entry:
+        if order_blocks:
+            ob = order_blocks[-1]
+            entry = (ob.top + ob.bottom) / 2.0
+        elif fvgs:
+            g = fvgs[-1]
+            entry = (g.top + g.bottom) / 2.0
+        elif sweep is not None:
+            entry = sweep.level
 
-    # For limit-style entries away from market, keep entry on the correct side
     if direction == Direction.LONG:
-        entry = min(entry, price)
+        if not scalp_entry:
+            entry = min(entry, price)
         structural_stop = None
         if order_blocks:
             structural_stop = order_blocks[-1].bottom
@@ -209,13 +214,13 @@ def _compute_levels(
             structural_stop = swing_lows[-1].price
         atr_stop = entry - atr * stop_mult
         stop = min(atr_stop, structural_stop) if structural_stop is not None else atr_stop
-        # Ensure stop is below entry
         if stop >= entry:
             stop = entry - atr * stop_mult
         risk = entry - stop
         target = entry + max(risk * settings.gates.min_reward_risk, atr * tgt_mult)
     else:
-        entry = max(entry, price)
+        if not scalp_entry:
+            entry = max(entry, price)
         structural_stop = None
         if order_blocks:
             structural_stop = order_blocks[-1].top

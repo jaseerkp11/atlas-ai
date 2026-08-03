@@ -186,7 +186,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     w = sub.add_parser(
         "watch",
-        help="Scan every new M15 close (~15m): S/R + signals to watch on chart",
+        help="Scalp watch: update on each NEW M5 close + optional --execute",
     )
     w.add_argument(
         "--execute",

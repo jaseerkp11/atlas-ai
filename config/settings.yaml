@@ -1,8 +1,9 @@
-# ATLAS Trading System — Central Configuration
-# All trade gates (min score, min RR, risk limits) are defined HERE only.
-# Do not duplicate or override these thresholds in other modules.
+# ATLAS — Scalp / Challenge account profile
+# Gates live ONLY here. No win-rate claims — consistency + risk control.
 
-mode: LIVE  # PAPER | LIVE — demo/live broker account; real order_send when LIVE
+mode: LIVE  # PAPER | LIVE
+
+profile: scalp_challenge
 
 symbols:
   - EURUSD
@@ -19,36 +20,35 @@ symbols:
   - CADJPY
   - XAUUSD
 
+# Scalp stack: H4/H1 bias, M5 setup + entry (updates every M5 close)
 timeframes:
   regime: H4
   trend: H1
-  setup: M15
+  setup: M5
   entry: M5
 
-# ── Trade gates (single source of truth) ──────────────────────────────────────
 gates:
-  min_score: 75          # out of 100 — setups below this are rejected
-  min_reward_risk: 3.0   # minimum 1:3 R:R before a trade is allowed
+  min_score: 75
+  min_reward_risk: 3.0   # 1:3
 
-# ── Scoring weights (must sum to 100) ─────────────────────────────────────────
 scoring_weights:
   h4_regime_alignment: 15
   h1_trend_confirmation: 15
-  structure_break: 15       # BOS and/or CHoCH
+  structure_break: 15
   liquidity_sweep: 15
   fair_value_gap: 10
   order_block: 10
   m5_trigger: 15
   volatility_context: 5
 
-# ── Risk management ───────────────────────────────────────────────────────────
+# Challenge-account friendly risk (small per-trade risk, hard daily stop)
 risk:
-  risk_percent: 0.5          # % of account balance risked per trade
+  risk_percent: 0.4
   atr_period: 14
-  atr_stop_multiplier: 1.5   # SL distance = ATR × this
-  atr_target_multiplier: 4.5 # TP distance ≈ ATR × this (for ~1:3 RR baseline)
-  max_concurrent_trades: 3
-  daily_loss_limit_percent: 2.0  # halt NEW trades once daily loss hits this %
+  atr_stop_multiplier: 1.0    # tighter scalp stop
+  atr_target_multiplier: 3.0  # aligns with ~1:3
+  max_concurrent_trades: 2
+  daily_loss_limit_percent: 2.0
   max_spread_pips:
     default: 2.0
     XAUUSD: 35.0
@@ -57,31 +57,27 @@ risk:
     EURJPY: 3.0
     CADJPY: 3.0
 
-# ── Session filters (UTC hours, inclusive start / exclusive end) ──────────────
 sessions:
   london: [7, 16]
   new_york: [12, 21]
-  # Trade only during overlapping / active sessions
   allowed_hours_utc: [7, 21]
 
-# ── Analysis lookbacks ────────────────────────────────────────────────────────
 analysis:
-  swing_lookback: 5
+  swing_lookback: 4
   structure_lookback: 50
   fvg_lookback: 30
   order_block_lookback: 40
   liquidity_lookback: 30
   equal_level_tolerance_atr: 0.15
-  watch_interval_seconds: 60   # poll MT5; full signal cards emit on each NEW M15 close (~15m)
+  watch_signal_timeframe: M5   # emit signal card on each NEW M5 close
+  watch_interval_seconds: 15   # poll MT5 often so M5 closes are caught quickly
+  scalp_market_entry: true     # enter near live price (scalp), stop from structure/ATR
 
-
-# ── Backtest ──────────────────────────────────────────────────────────────────
 backtest:
   initial_balance: 10000.0
   history_bars_m5: 5000
-  pending_expiry_bars: 12   # cancel unfilled pending after N M5 bars
+  pending_expiry_bars: 6
 
-# ── Paths ─────────────────────────────────────────────────────────────────────
 paths:
   journal_dir: journals
   log_dir: logs
