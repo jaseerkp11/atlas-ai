@@ -29,8 +29,8 @@ def test_config_loads_xauusd():
     assert cfg.stop_loss_points > 0
     assert cfg.mode == "PAPER"
     assert cfg.use_fixed_lots is True
-    assert cfg.fixed_lots == 0.01
-    assert cfg.max_lots <= 0.05
+    assert cfg.fixed_lots == 1.0
+    assert cfg.max_lots == 1.0
 
 
 def test_fixed_lot_sizing():
@@ -42,7 +42,7 @@ def test_fixed_lot_sizing():
     feed.connect()
     risk = TickRiskManager(feed, cfg)
     vol, msg = risk.position_size(cfg.stop_loss_points)
-    assert vol == 0.01
+    assert vol == 1.0
     assert "FIXED" in msg
     feed.disconnect()
 

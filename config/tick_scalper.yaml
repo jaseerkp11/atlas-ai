@@ -17,8 +17,8 @@ tick_scalper:
 
   # Risk — prefer fixed micro lot on gold (avoids "No money" from bad tick-value math)
   use_fixed_lots: true
-  fixed_lots: 0.01
-  max_lots: 0.05            # hard cap even if risk% sizing is enabled
+  fixed_lots: 1.0
+  max_lots: 1.0             # hard cap even if risk% sizing is enabled
   risk_percent: 0.25        # only used when use_fixed_lots: false
   stop_loss_points: 80.0
   take_profit_points: 120.0
