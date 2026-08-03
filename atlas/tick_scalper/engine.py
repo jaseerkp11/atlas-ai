@@ -48,21 +48,24 @@ class TickEngine:
 
     def start(self, max_ticks: int | None = None) -> EngineStats:
         print("=" * 64)
-        print("  ATLAS XAUUSD BURST MULTI-ENTRY SCALPER")
+        print("  ATLAS XAUUSD M1 + 5s MICRO SCALPER")
         print(f"  Mode     : {self.cfg.mode}")
         print(f"  Symbol   : {self.cfg.symbol}")
+        print(f"  Micro TF : {self.cfg.micro_tf_seconds}s synthetic candles")
+        print(f"  M1 filter: {self.cfg.use_m1_filter} (lookback={self.cfg.m1_lookback})")
         print(f"  Max open : {self.cfg.max_open_positions} (burst parallel)")
         print(f"  Ladder   : {list(self.cfg.profit_ladder_points)} pts")
         print(f"  Max sprd : {self.cfg.max_spread_points} pts")
         print(f"  Base SL  : {self.cfg.stop_loss_points} pts (spread-aware)")
         print(f"  Lots     : FIXED {self.cfg.fixed_lots} each")
         print("=" * 64)
-        print("Open many → each closes on profit OR SL → free slot opens next.")
-        print("Close uses real position ticket (fixes Invalid request 10013).")
+        print("Entry on M1 + micro-bar agreement. Exit every tick on profit/SL.")
         print("Ctrl+C to stop.\n")
 
         if not self.feed.connect():
             raise RuntimeError("MT5 connection failed — open MetaTrader 5 and check .env")
+
+        self.strategy.set_mt5_live(self.feed._use_mt5)
 
         equity = self.feed.account_equity()
         self.risk.reset_day_if_needed(equity)

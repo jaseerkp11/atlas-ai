@@ -39,6 +39,11 @@ class TickScalperConfig:
     min_points_between_entries: float
     daily_loss_limit_percent: float
     cooldown_ms_after_close: int
+    micro_tf_seconds: int
+    require_micro_bar_close: bool
+    micro_bars_agree: int
+    use_m1_filter: bool
+    m1_lookback: int
     vwap_enabled: bool
     vwap_near_points: float
     min_tick_momentum: int
@@ -62,7 +67,6 @@ class TickScalperConfig:
         return 0.01
 
     def profit_target_for_slot(self, slot_index: int) -> float:
-        """Staggered take-profit points for multi-entry ladder."""
         if self.profit_ladder_points:
             return float(self.profit_ladder_points[slot_index % len(self.profit_ladder_points)])
         return self.instant_profit_points
@@ -104,10 +108,15 @@ def load_tick_config(reload: bool = False) -> TickScalperConfig:
         stop_loss_points=float(t["stop_loss_points"]),
         take_profit_points=float(t["take_profit_points"]),
         max_open_positions=int(t["max_open_positions"]),
-        pyramid_winners_only=bool(t.get("pyramid_winners_only", True)),
-        min_points_between_entries=float(t.get("min_points_between_entries", 10.0)),
+        pyramid_winners_only=bool(t.get("pyramid_winners_only", False)),
+        min_points_between_entries=float(t.get("min_points_between_entries", 0.0)),
         daily_loss_limit_percent=float(t["daily_loss_limit_percent"]),
         cooldown_ms_after_close=int(t["cooldown_ms_after_close"]),
+        micro_tf_seconds=int(t.get("micro_tf_seconds", 5)),
+        require_micro_bar_close=bool(t.get("require_micro_bar_close", True)),
+        micro_bars_agree=int(t.get("micro_bars_agree", 2)),
+        use_m1_filter=bool(t.get("use_m1_filter", True)),
+        m1_lookback=int(t.get("m1_lookback", 3)),
         vwap_enabled=bool(t["vwap_enabled"]),
         vwap_near_points=float(t["vwap_near_points"]),
         min_tick_momentum=int(t["min_tick_momentum"]),

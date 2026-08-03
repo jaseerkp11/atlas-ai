@@ -67,14 +67,16 @@ def test_strategy_no_force_on_flat_tape():
 def test_strategy_momentum_buy_can_fire():
     cfg = load_tick_config(reload=True)
     strat = TickStrategy(cfg)
+    strat.set_mt5_live(False)  # skip M1 broker filter offline
     point = cfg.point_size
     price = 4000.0
     last_sig = None
-    for i in range(80):
-        price += 0.35  # strong up tape — VWAP lags below mid
+    # Advance ~200ms per tick so several 5s micro-bars close while rising
+    for i in range(200):
+        price += 0.25
         spread = 0.15
         t = Tick(
-            time_msc=1_700_000_000_000 + i * 100,
+            time_msc=1_700_000_000_000 + i * 200,
             bid=price,
             ask=price + spread,
             last=price,
@@ -84,6 +86,27 @@ def test_strategy_momentum_buy_can_fire():
         last_sig = strat.evaluate_entry(t, point) or last_sig
     assert last_sig is not None
     assert last_sig.side == Side.BUY
+    assert "5s" in last_sig.reason or f"{cfg.micro_tf_seconds}s" in last_sig.reason
+
+
+def test_micro_bar_builder_5s():
+    from atlas.tick_scalper.micro_bars import MicroBarBuilder
+
+    b = MicroBarBuilder(period_seconds=5)
+    closed_n = 0
+    for i in range(30):
+        t = Tick(
+            time_msc=1_700_000_000_000 + i * 1000,  # 1s steps
+            bid=4000 + i * 0.1,
+            ask=4000.2 + i * 0.1,
+            last=4000 + i * 0.1,
+            volume=1,
+        )
+        if b.on_tick(t) is not None:
+            closed_n += 1
+    assert closed_n >= 4
+    assert b.last_closed is not None
+    assert b.last_closed.bullish
 
 
 def test_hard_tp_exit():

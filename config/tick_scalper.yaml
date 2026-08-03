@@ -31,6 +31,14 @@ tick_scalper:
   daily_loss_limit_percent: 2.0
   cooldown_ms_after_close: 0
 
+  # Timeframes for higher-quality entries (exits still every tick)
+  # MT5 has no native 1s/5s charts — we build them from ticks.
+  micro_tf_seconds: 5          # 1 or 5 second synthetic candles
+  require_micro_bar_close: true  # enter only when a micro-bar just closed
+  micro_bars_agree: 2          # last N micro-bars must agree direction
+  use_m1_filter: true          # also require last closed M1 candle alignment
+  m1_lookback: 3               # majority of last N M1 candles
+
   vwap_enabled: false
   vwap_near_points: 80.0
   min_tick_momentum: 2
