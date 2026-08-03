@@ -10,6 +10,7 @@ LIVE path:
 from __future__ import annotations
 
 from dataclasses import dataclass
+import time
 
 from atlas.tick_scalper.config import TickScalperConfig, load_tick_config
 from atlas.tick_scalper.logger import TickLogger
@@ -103,6 +104,7 @@ class TickExecutor:
                 tp=tp,
                 volume=volume,
                 ticket=ticket,
+                opened_msc=int(time.time() * 1000),
             )
             self.log.trade(
                 event="ENTRY",

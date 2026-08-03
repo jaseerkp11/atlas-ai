@@ -55,19 +55,21 @@ class TickEngine:
         Connect to MT5 and run the tick loop until Ctrl+C or max_ticks.
         """
         print("=" * 64)
-        print("  ATLAS XAUUSD TICK SCALPER  (every tick)")
+        print("  ATLAS XAUUSD RAPID PROFIT SCALPER")
         print(f"  Mode     : {self.cfg.mode}")
         print(f"  Symbol   : {self.cfg.symbol}")
         print(f"  Max sprd : {self.cfg.max_spread_points} pts")
+        print(f"  Instant$ : +{self.cfg.instant_profit_points} pts → CLOSE NOW")
         print(f"  TP / SL  : {self.cfg.take_profit_points} / {self.cfg.stop_loss_points} pts")
         if self.cfg.use_fixed_lots:
             print(f"  Lots     : FIXED {self.cfg.fixed_lots} (cap {self.cfg.max_lots})")
         else:
             print(f"  Risk     : {self.cfg.risk_percent}% / trade (cap {self.cfg.max_lots} lots)")
+        print(f"  Rapid    : {self.cfg.rapid_cycle} | cooldown={self.cfg.cooldown_ms_after_close}ms")
         print(f"  Daily DD : {self.cfg.daily_loss_limit_percent}%")
-        print(f"  Max open : {self.cfg.max_open_positions}")
         print("=" * 64)
-        print("No Martingale / Grid / averaging. Edge-only entries.")
+        print("Cycle: OPEN → bank tiny profit ASAP → OPEN again. No martingale/grid.")
+        print("Losers still hit SL (cannot guarantee every trade is a win).")
         print("Ctrl+C to stop.\n")
 
         if not self.feed.connect():

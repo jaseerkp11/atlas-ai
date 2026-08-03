@@ -1,41 +1,42 @@
 # ATLAS XAUUSD High-Speed Tick Scalper
-# Optimized for every incoming MT5 tick (not candle closes).
+# RAPID CYCLE: open → bank tiny profit ASAP → re-enter (every tick / ~each second)
 
-mode: PAPER  # PAPER | LIVE — use PAPER first on demo
+mode: PAPER  # PAPER | LIVE
 
 tick_scalper:
   symbol: XAUUSD
   magic: 26080401
-  # Poll MT5 for new ticks (ms). 0 = busy-wait (lowest latency, higher CPU).
-  poll_sleep_ms: 1
-  # Only evaluate strategy when bid/ask actually changes
+  poll_sleep_ms: 0              # lowest latency busy-poll
   require_price_change: true
 
-  # Spread / slippage filters (gold points; 1 point = 0.01 on typical XAU quotes)
-  max_spread_points: 40.0
-  max_slippage_points: 30.0
+  max_spread_points: 45.0
+  max_slippage_points: 40.0
 
-  # Risk — prefer fixed micro lot on gold (avoids "No money" from bad tick-value math)
+  # 1.0 lot (user request) — keep
   use_fixed_lots: true
   fixed_lots: 1.0
-  max_lots: 1.0             # hard cap even if risk% sizing is enabled
-  risk_percent: 0.25        # only used when use_fixed_lots: false
-  stop_loss_points: 80.0
-  take_profit_points: 120.0
+  max_lots: 1.0
+  risk_percent: 0.25
+
+  # RAPID PROFIT MACHINE
+  # Close the INSTANT unrealized PnL >= instant_profit_points (bid/ask aware).
+  # Hard TP is a backup if it runs further; SL still protects losers.
+  rapid_cycle: true
+  instant_profit_points: 3.0    # bank +3 pts (~$3 / 1.0 lot) as soon as green enough
+  take_profit_points: 25.0      # hard TP backup
+  stop_loss_points: 50.0        # must keep SL — cannot only close winners
   max_open_positions: 1
   daily_loss_limit_percent: 1.5
-  cooldown_ms_after_close: 500
+  cooldown_ms_after_close: 0    # re-scan immediately after close
 
-  # Strategy edge filters (all must pass — never force trades)
-  vwap_enabled: true
-  vwap_near_points: 50.0
-  min_tick_momentum: 3
-  momentum_lookback: 8
-  min_tick_range_points: 5.0
-  # XAUUSD trades almost 24h Mon–Fri. [0,24) = all hours; weekends still blocked in code.
+  # Faster entries (still need short-tape edge — not a blind timer)
+  vwap_enabled: false           # off = more frequent cycles
+  vwap_near_points: 80.0
+  min_tick_momentum: 2
+  momentum_lookback: 4
+  min_tick_range_points: 2.0
   session_hours_utc: [0, 24]
 
-  # Logging
   log_every_tick: false
   tick_summary_every_n: 500
   log_dir: logs/tick_scalper

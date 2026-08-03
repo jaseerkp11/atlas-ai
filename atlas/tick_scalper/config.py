@@ -29,6 +29,8 @@ class TickScalperConfig:
     fixed_lots: float
     max_lots: float
     risk_percent: float
+    rapid_cycle: bool
+    instant_profit_points: float
     stop_loss_points: float
     take_profit_points: float
     max_open_positions: int
@@ -54,7 +56,6 @@ class TickScalperConfig:
 
     @property
     def point_size(self) -> float:
-        """XAUUSD typical point (0.01)."""
         return 0.01
 
 
@@ -87,6 +88,8 @@ def load_tick_config(reload: bool = False) -> TickScalperConfig:
         fixed_lots=float(t.get("fixed_lots", 1.0)),
         max_lots=float(t.get("max_lots", 1.0)),
         risk_percent=float(t["risk_percent"]),
+        rapid_cycle=bool(t.get("rapid_cycle", True)),
+        instant_profit_points=float(t.get("instant_profit_points", 3.0)),
         stop_loss_points=float(t["stop_loss_points"]),
         take_profit_points=float(t["take_profit_points"]),
         max_open_positions=int(t["max_open_positions"]),

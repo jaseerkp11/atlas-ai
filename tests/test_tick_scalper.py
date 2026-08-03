@@ -31,6 +31,8 @@ def test_config_loads_xauusd():
     assert cfg.use_fixed_lots is True
     assert cfg.fixed_lots == 1.0
     assert cfg.max_lots == 1.0
+    assert cfg.rapid_cycle is True
+    assert cfg.instant_profit_points > 0
 
 
 def test_fixed_lot_sizing():
@@ -93,7 +95,20 @@ def test_hard_tp_exit():
         mid = entry + i * 0.01
         strat.update(Tick(1, mid, mid + 0.2, mid, 1), point)
     hit = Tick(time_msc=2, bid=tp + 0.01, ask=tp + 0.21, last=tp, volume=1)
-    assert strat.evaluate_exit(hit, pos, point) == "take_profit"
+    # Rapid mode banks via instant_profit before hard TP label
+    assert strat.evaluate_exit(hit, pos, point) in ("instant_profit", "take_profit")
+
+
+def test_instant_profit_closes_asap():
+    cfg = load_tick_config(reload=True)
+    strat = TickStrategy(cfg)
+    point = cfg.point_size
+    entry = 4050.0
+    sl, tp = strat.levels_for(Side.BUY, entry, point)
+    pos = OpenState(side=Side.BUY, entry=entry, sl=sl, tp=tp, volume=1.0, ticket=9)
+    bid = entry + (cfg.instant_profit_points + 0.5) * point
+    tick = Tick(time_msc=3, bid=bid, ask=bid + 0.2, last=bid, volume=1)
+    assert strat.evaluate_exit(tick, pos, point) == "instant_profit"
 
 
 def test_hard_sl_exit():
