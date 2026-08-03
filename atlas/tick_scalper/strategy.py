@@ -181,9 +181,18 @@ class TickStrategy:
 
         return None
 
-    def levels_for(self, side: Side, entry: float, point: float) -> tuple[float, float]:
-        sl_dist = self.cfg.stop_loss_points * point
-        tp_dist = self.cfg.take_profit_points * point
+    def levels_for(
+        self, side: Side, entry: float, point: float, spread_points: float = 0.0
+    ) -> tuple[float, float]:
+        """
+        Best SL: at least base stop_loss_points, and always beyond current spread
+        so we are not stopped by the open spread alone.
+        """
+        # spread*1.2 + 20 buffer, or configured — whichever is safer (larger for SL distance)
+        sl_pts = max(self.cfg.stop_loss_points, spread_points * 1.2 + 20.0)
+        tp_pts = max(self.cfg.take_profit_points, self.cfg.instant_profit_points + 5.0)
+        sl_dist = sl_pts * point
+        tp_dist = tp_pts * point
         if side == Side.BUY:
             return entry - sl_dist, entry + tp_dist
         return entry + sl_dist, entry - tp_dist

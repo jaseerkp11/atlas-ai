@@ -48,19 +48,18 @@ class TickEngine:
 
     def start(self, max_ticks: int | None = None) -> EngineStats:
         print("=" * 64)
-        print("  ATLAS XAUUSD MULTI-ENTRY PROFIT SCALPER")
+        print("  ATLAS XAUUSD BURST MULTI-ENTRY SCALPER")
         print(f"  Mode     : {self.cfg.mode}")
         print(f"  Symbol   : {self.cfg.symbol}")
-        print(f"  Max open : {self.cfg.max_open_positions} (parallel)")
+        print(f"  Max open : {self.cfg.max_open_positions} (burst parallel)")
         print(f"  Ladder   : {list(self.cfg.profit_ladder_points)} pts")
         print(f"  Max sprd : {self.cfg.max_spread_points} pts")
-        print(f"  TP / SL  : {self.cfg.take_profit_points} / {self.cfg.stop_loss_points} pts")
+        print(f"  Base SL  : {self.cfg.stop_loss_points} pts (spread-aware)")
         print(f"  Lots     : FIXED {self.cfg.fixed_lots} each")
-        print(f"  Pyramid  : winners_only={self.cfg.pyramid_winners_only}")
-        print(f"  Daily DD : {self.cfg.daily_loss_limit_percent}%")
         print("=" * 64)
-        print("Multiple entries OK. Each closes on its own profit target.")
-        print("Never averages into losers. Ctrl+C to stop.\n")
+        print("Open many → each closes on profit OR SL → free slot opens next.")
+        print("Close uses real position ticket (fixes Invalid request 10013).")
+        print("Ctrl+C to stop.\n")
 
         if not self.feed.connect():
             raise RuntimeError("MT5 connection failed — open MetaTrader 5 and check .env")
@@ -105,17 +104,22 @@ class TickEngine:
     def _pyramid_ok(self, signal_side: Side, tick: Tick, point: float) -> tuple[bool, str]:
         if not self._positions:
             return True, "flat"
+        # Never hedge both directions at once
+        for p in self._positions:
+            if p.side != signal_side:
+                return False, "opposite side open — wait for flat/same side"
         if self.cfg.pyramid_winners_only:
             for p in self._positions:
-                if p.side != signal_side:
-                    return False, "opposite side open — no hedge stack"
                 if self._unrealized(p, tick, point) < 0:
                     return False, "open loser — no averaging"
-        if self._last_entry_mid is not None:
+        if (
+            self._last_entry_mid is not None
+            and self.cfg.min_points_between_entries > 0
+        ):
             moved = abs(tick.mid - self._last_entry_mid) / point
             if moved < self.cfg.min_points_between_entries:
                 return False, f"need {self.cfg.min_points_between_entries}pts between entries"
-        return True, "pyramid OK"
+        return True, "burst OK"
 
     def _on_tick(self, tick: Tick, point: float) -> None:
         t0 = time.perf_counter()
@@ -132,12 +136,11 @@ class TickEngine:
                 volume=tick.volume,
             )
 
-        # Sync all open positions, then exit any that hit profit/SL
+        # 1) Manage exits first — free slots → immediate next entry below
         self._positions = self.exec.current_positions()
         self._manage_all(tick, point)
         self._positions = self.exec.current_positions()
 
-        # Still room? evaluate another entry (multi parallel)
         if self.risk.state.halted:
             return
         if len(self._positions) >= self.cfg.max_open_positions:
@@ -157,7 +160,7 @@ class TickEngine:
         pyr_ok, pyr_why = self._pyramid_ok(signal.side, tick, point)
         if not pyr_ok:
             self.stats.blocked += 1
-            self.log.event(f"PYRAMID_BLOCK {pyr_why}")
+            self.log.event(f"ENTRY_BLOCK {pyr_why}")
             return
 
         volume, size_msg = self.risk.position_size(self.cfg.stop_loss_points)
@@ -168,9 +171,9 @@ class TickEngine:
 
         slot = len(self._positions)
         target = self.cfg.profit_target_for_slot(slot)
+        spread_pts = tick.spread_points(point)
         entry = signal.ask if signal.side == Side.BUY else signal.bid
-        sl, tp = self.strategy.levels_for(signal.side, entry, point)
-        # Hard TP at least as far as ladder target
+        sl, tp = self.strategy.levels_for(signal.side, entry, point, spread_points=spread_pts)
         tp_dist = max(self.cfg.take_profit_points, target + 5.0) * point
         if signal.side == Side.BUY:
             tp = entry + tp_dist
@@ -179,7 +182,7 @@ class TickEngine:
 
         self.log.event(
             f"SIGNAL {signal.side.value} slot={slot + 1}/{self.cfg.max_open_positions} "
-            f"target=+{target}pts | {signal.reason}"
+            f"target=+{target}pts SL_dist≈{abs(entry - sl) / point:.0f}pts | {signal.reason}"
         )
         result = self.exec.open_market(
             signal, volume, sl, tp, profit_target_points=target
@@ -193,9 +196,9 @@ class TickEngine:
         self.stats.entries += 1
         print(
             f"[{_ts()}] ENTRY#{self.stats.entries} {signal.side.value} @{result.price:.3f} "
-            f"vol={result.volume} target=+{target}pts open={len(self._positions)} | {size_msg}"
+            f"vol={result.volume} target=+{target}pts open={len(self._positions)}/{self.cfg.max_open_positions}"
         )
-        if (time.perf_counter() - t0) * 1000.0 > 8.0:
+        if (time.perf_counter() - t0) * 1000.0 > 50.0:
             self.log.event(f"SLOW_TICK process={(time.perf_counter() - t0) * 1000.0:.2f}ms")
 
     def _manage_all(self, tick: Tick, point: float) -> None:

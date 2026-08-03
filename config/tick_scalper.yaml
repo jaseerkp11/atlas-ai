@@ -1,6 +1,5 @@
 # ATLAS XAUUSD High-Speed Tick Scalper
-# MULTI-ENTRY: several positions open together; each closes independently on profit.
-# Pyramid winners only — never average into losers / no grid / no martingale.
+# Burst multi-entry: open up to 6 fast, each closes on profit OR tight SL, then next.
 
 mode: PAPER  # PAPER | LIVE
 
@@ -10,33 +9,33 @@ tick_scalper:
   poll_sleep_ms: 0
   require_price_change: true
 
-  # Tighter spread = fewer instant losers (gold starts underwater by the spread)
-  max_spread_points: 28.0
-  max_slippage_points: 40.0
+  max_spread_points: 35.0
+  max_slippage_points: 80.0
 
-  # 1.0 lot per entry (user request). Margin limits how many can stack.
   use_fixed_lots: true
   fixed_lots: 1.0
   max_lots: 1.0
   risk_percent: 0.25
 
   rapid_cycle: true
-  # Staggered profit takes — each open slot uses the next ladder level
-  profit_ladder_points: [5.0, 8.0, 12.0, 18.0, 25.0]
-  instant_profit_points: 5.0    # fallback if ladder empty
-  take_profit_points: 40.0
-  stop_loss_points: 90.0        # wider — spread alone eats ~20-30 pts at open
-  max_open_positions: 5         # MULTIPLE entries at once
-  pyramid_winners_only: true    # only add when ALL open trades are green
-  min_points_between_entries: 10.0
-  daily_loss_limit_percent: 1.5
+  # Fast profit takes
+  profit_ladder_points: [5.0, 5.0, 8.0, 8.0, 12.0, 12.0]
+  instant_profit_points: 5.0
+  take_profit_points: 30.0
+  # Dynamic SL floor also applied in code (spread-aware). This is the base.
+  stop_loss_points: 45.0
+  max_open_positions: 6
+  # Allow burst entries in the same second (user request)
+  pyramid_winners_only: false
+  min_points_between_entries: 0.0
+  daily_loss_limit_percent: 2.0
   cooldown_ms_after_close: 0
 
   vwap_enabled: false
   vwap_near_points: 80.0
-  min_tick_momentum: 3
-  momentum_lookback: 5
-  min_tick_range_points: 3.0
+  min_tick_momentum: 2
+  momentum_lookback: 4
+  min_tick_range_points: 2.0
   session_hours_utc: [0, 24]
 
   log_every_tick: false
