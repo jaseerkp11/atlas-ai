@@ -55,14 +55,12 @@ class TickRiskManager:
     def in_session(self, now: datetime | None = None) -> tuple[bool, str]:
         now = now or datetime.now(timezone.utc)
         start, end = self.cfg.session_hours_utc
-        # Gold: Fri close ~21–22 UTC, Sun open ~22 UTC (broker-dependent)
         if now.weekday() == 5:
             return False, "Saturday closed"
         if now.weekday() == 6 and now.hour < 22:
             return False, "Sunday pre-open (gold ~22:00 UTC)"
         if now.weekday() == 4 and now.hour >= 22:
             return False, "Friday late close / thin liquidity"
-        # end=24 means all hours 0..23 when start=0
         if start <= now.hour < end:
             return True, "session open"
         return False, f"outside session UTC [{start},{end})"
@@ -89,45 +87,76 @@ class TickRiskManager:
 
         return True, "risk OK"
 
-    def position_size(self, stop_points: float) -> tuple[float, str]:
-        """
-        volume from balance * risk% / (stop_points * tick_value_approx).
-        For XAUUSD: 1.00 lot ≈ $1 per 0.01 move → $100 per 1.00 point? 
-        Actually: contract 100 oz, $1 move = $100/lot. point=0.01 → $1 per point per lot.
-        """
-        balance = self.feed.account_balance()
-        if balance <= 0 or stop_points <= 0:
-            return 0.0, "invalid balance/stop"
+    def _normalize_volume(self, raw: float) -> float:
+        min_lot, step, broker_max = self.feed.symbol_volume_limits()
+        cap = min(broker_max, self.cfg.max_lots)
+        if step <= 0:
+            step = 0.01
+        steps = int(raw / step + 1e-9)
+        vol = max(0.0, min(steps * step, cap))
+        # Keep volume digits consistent with step
+        decimals = max(0, len(str(step).rstrip("0").split(".")[-1]) if "." in str(step) else 0)
+        vol = round(vol, decimals or 2)
+        if vol < min_lot:
+            return 0.0
+        return vol
 
-        risk_cash = balance * (self.cfg.risk_percent / 100.0)
-        # $ per point per 1.0 lot for XAU ≈ 1.0 when point=0.01 (broker dependent)
+    def _money_per_point_per_lot(self) -> float:
+        """
+        $ PnL per 1.0 point move per 1.0 lot.
+        Brokers often mis-report tick_value for gold — sanity-clamp to ~1.0.
+        """
         point = self.feed.symbol_point()
-        # money per point per lot ≈ contract_size * point; XAU contract 100 → $1 per 0.01
-        money_per_point_per_lot = 1.0
+        money = 1.0
         if self.feed._use_mt5:
             try:
                 import MetaTrader5 as mt5
 
                 info = mt5.symbol_info(self.cfg.symbol)
                 if info and info.trade_tick_value and info.trade_tick_size:
-                    money_per_point_per_lot = float(info.trade_tick_value) * (
+                    calc = float(info.trade_tick_value) * (
                         point / float(info.trade_tick_size)
                     )
+                    # XAUUSD typical band ~0.5–10 $/point/lot; outside → ignore
+                    if 0.5 <= calc <= 10.0:
+                        money = calc
             except Exception:
                 pass
+        return money
 
+    def position_size(self, stop_points: float) -> tuple[float, str]:
+        """
+        Prefer fixed micro lots for gold scalping (reliable margin).
+        Optional risk% path is capped by max_lots.
+        """
+        min_lot, step, _ = self.feed.symbol_volume_limits()
+
+        if self.cfg.use_fixed_lots:
+            vol = self._normalize_volume(self.cfg.fixed_lots)
+            if vol <= 0:
+                return 0.0, f"fixed_lots {self.cfg.fixed_lots} below min {min_lot}"
+            return vol, f"size={vol} FIXED (max={self.cfg.max_lots})"
+
+        balance = self.feed.account_balance()
+        if balance <= 0 or stop_points <= 0:
+            return 0.0, "invalid balance/stop"
+
+        risk_cash = balance * (self.cfg.risk_percent / 100.0)
+        money_per_point_per_lot = self._money_per_point_per_lot()
         loss_per_lot = stop_points * money_per_point_per_lot
         if loss_per_lot <= 0:
             return 0.0, "loss_per_lot invalid"
 
         raw = risk_cash / loss_per_lot
-        min_lot, step, max_lot = self.feed.symbol_volume_limits()
-        steps = int(raw / step)
-        vol = max(0.0, min(steps * step, max_lot))
-        vol = round(vol, 2)
-        if vol < min_lot:
-            return 0.0, f"volume {raw:.4f} below min {min_lot}"
+        vol = self._normalize_volume(raw)
+        if vol <= 0:
+            # Fall back to minimum lot if risk% is tiny but account can trade
+            vol = self._normalize_volume(min_lot)
+            if vol <= 0:
+                return 0.0, f"volume {raw:.4f} below min {min_lot}"
+            return vol, f"size={vol} MIN_LOT fallback (risk raw={raw:.4f})"
+
         return vol, (
             f"size={vol} from risk ${risk_cash:.2f} / ({stop_points:.1f} pts "
-            f"× ${money_per_point_per_lot:.2f}/pt) "
+            f"× ${money_per_point_per_lot:.2f}/pt) cap={self.cfg.max_lots}"
         )

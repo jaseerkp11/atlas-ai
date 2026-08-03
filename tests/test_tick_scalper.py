@@ -28,6 +28,23 @@ def test_config_loads_xauusd():
     assert cfg.take_profit_points > 0
     assert cfg.stop_loss_points > 0
     assert cfg.mode == "PAPER"
+    assert cfg.use_fixed_lots is True
+    assert cfg.fixed_lots == 0.01
+    assert cfg.max_lots <= 0.05
+
+
+def test_fixed_lot_sizing():
+    from atlas.tick_scalper.mt5_feed import MT5TickFeed
+    from atlas.tick_scalper.risk import TickRiskManager
+
+    cfg = load_tick_config(reload=True)
+    feed = MT5TickFeed(cfg)
+    feed.connect()
+    risk = TickRiskManager(feed, cfg)
+    vol, msg = risk.position_size(cfg.stop_loss_points)
+    assert vol == 0.01
+    assert "FIXED" in msg
+    feed.disconnect()
 
 
 def test_strategy_no_force_on_flat_tape():

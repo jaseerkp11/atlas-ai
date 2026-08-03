@@ -7,7 +7,6 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
 
 import yaml
 from dotenv import load_dotenv
@@ -26,6 +25,9 @@ class TickScalperConfig:
     require_price_change: bool
     max_spread_points: float
     max_slippage_points: float
+    use_fixed_lots: bool
+    fixed_lots: float
+    max_lots: float
     risk_percent: float
     stop_loss_points: float
     take_profit_points: float
@@ -81,6 +83,9 @@ def load_tick_config(reload: bool = False) -> TickScalperConfig:
         require_price_change=bool(t["require_price_change"]),
         max_spread_points=float(t["max_spread_points"]),
         max_slippage_points=float(t["max_slippage_points"]),
+        use_fixed_lots=bool(t.get("use_fixed_lots", True)),
+        fixed_lots=float(t.get("fixed_lots", 0.01)),
+        max_lots=float(t.get("max_lots", 0.05)),
         risk_percent=float(t["risk_percent"]),
         stop_loss_points=float(t["stop_loss_points"]),
         take_profit_points=float(t["take_profit_points"]),

@@ -1,11 +1,15 @@
 """
 Trade execution — MARKET entries/exits only. No pending grids, no averaging.
+
+LIVE path:
+  - order_check + auto-shrink volume on margin failure
+  - try broker-supported filling modes (IOC / FOK / RETURN)
+  - rich failure comments (retcode, volume, free margin)
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timezone
 
 from atlas.tick_scalper.config import TickScalperConfig, load_tick_config
 from atlas.tick_scalper.logger import TickLogger
@@ -43,6 +47,46 @@ class TickExecutor:
         self.paper_position: OpenState | None = None
         self._paper_ticket = 900000
 
+    def _filling_modes(self) -> list[int]:
+        assert mt5 is not None
+        info = mt5.symbol_info(self.cfg.symbol)
+        modes: list[int] = []
+        if info is not None:
+            fm = int(getattr(info, "filling_mode", 0) or 0)
+            # SYMBOL_FILLING_* bit flags
+            if fm & 1:  # FOK
+                modes.append(mt5.ORDER_FILLING_FOK)
+            if fm & 2:  # IOC
+                modes.append(mt5.ORDER_FILLING_IOC)
+            if fm & 4:  # RETURN
+                modes.append(mt5.ORDER_FILLING_RETURN)
+        if not modes:
+            modes = [
+                mt5.ORDER_FILLING_IOC,
+                mt5.ORDER_FILLING_FOK,
+                mt5.ORDER_FILLING_RETURN,
+            ]
+        # Prefer IOC first for scalping, then others unique
+        ordered: list[int] = []
+        for m in [mt5.ORDER_FILLING_IOC, mt5.ORDER_FILLING_FOK, mt5.ORDER_FILLING_RETURN] + modes:
+            if m not in ordered and m in modes:
+                ordered.append(m)
+        return ordered or [mt5.ORDER_FILLING_IOC]
+
+    def _shrink_volume(self, volume: float) -> float:
+        min_lot, step, _ = self.feed.symbol_volume_limits()
+        nxt = volume - step
+        if nxt + 1e-12 < min_lot:
+            return 0.0
+        decimals = max(0, len(str(step).rstrip("0").split(".")[-1]) if "." in str(step) else 0)
+        return round(max(min_lot, nxt), decimals or 2)
+
+    def _account_free_margin(self) -> float:
+        if not MT5_OK or mt5 is None:
+            return 0.0
+        info = mt5.account_info()
+        return float(getattr(info, "margin_free", 0.0) or 0.0) if info else 0.0
+
     def open_market(self, signal: Signal, volume: float, sl: float, tp: float) -> ExecResult:
         symbol = self.cfg.symbol
         if volume <= 0:
@@ -78,50 +122,94 @@ class TickExecutor:
         order_type = mt5.ORDER_TYPE_BUY if signal.side == Side.BUY else mt5.ORDER_TYPE_SELL
         price = signal.ask if signal.side == Side.BUY else signal.bid
         deviation = int(self.cfg.max_slippage_points)
-        request = {
-            "action": mt5.TRADE_ACTION_DEAL,
-            "symbol": symbol,
-            "volume": float(volume),
-            "type": order_type,
-            "price": float(price),
-            "sl": float(sl),
-            "tp": float(tp),
-            "deviation": deviation,
-            "magic": self.cfg.magic,
-            "comment": "ATLAS_TICK",
-            "type_time": mt5.ORDER_TIME_GTC,
-            "type_filling": mt5.ORDER_FILLING_IOC,
-        }
-        result = mt5.order_send(request)
-        if result is None:
-            return ExecResult(False, 0, 0.0, 0.0, str(mt5.last_error()))
-        ok = result.retcode == mt5.TRADE_RETCODE_DONE
-        fill = float(result.price or price)
-        ticket = int(result.order or result.deal or 0)
-        if ok:
-            self.log.trade(
-                event="ENTRY",
-                symbol=symbol,
-                direction=signal.side.value,
-                volume=volume,
-                price=fill,
-                sl=sl,
-                tp=tp,
-                ticket=ticket,
-                reason=signal.reason,
-                mode="LIVE",
-            )
-        return ExecResult(ok, ticket, fill, float(result.volume or volume), result.comment)
+        free = self._account_free_margin()
+
+        # Auto-reduce volume until order_check passes or min lot fails
+        attempt_vol = float(volume)
+        last_comment = "no attempt"
+        while attempt_vol > 0:
+            filled = False
+            for filling in self._filling_modes():
+                request = {
+                    "action": mt5.TRADE_ACTION_DEAL,
+                    "symbol": symbol,
+                    "volume": float(attempt_vol),
+                    "type": order_type,
+                    "price": float(price),
+                    "sl": float(sl),
+                    "tp": float(tp),
+                    "deviation": deviation,
+                    "magic": self.cfg.magic,
+                    "comment": "ATLAS_TICK",
+                    "type_time": mt5.ORDER_TIME_GTC,
+                    "type_filling": filling,
+                }
+                check = mt5.order_check(request)
+                if check is not None and check.retcode not in (
+                    0,
+                    mt5.TRADE_RETCODE_DONE,
+                    10009,  # done / placed variants on some builds
+                ):
+                    # 10019 = no money
+                    last_comment = (
+                        f"check retcode={check.retcode} {check.comment} "
+                        f"vol={attempt_vol} free_margin={free:.2f}"
+                    )
+                    if check.retcode == 10019 or "money" in str(check.comment).lower():
+                        break  # shrink volume
+                    # Try next filling mode for unsupported filling etc.
+                    continue
+
+                result = mt5.order_send(request)
+                if result is None:
+                    last_comment = f"order_send None {mt5.last_error()} vol={attempt_vol}"
+                    continue
+                if result.retcode == mt5.TRADE_RETCODE_DONE:
+                    fill = float(result.price or price)
+                    ticket = int(result.order or result.deal or 0)
+                    # Prefer position ticket if available
+                    positions = mt5.positions_get(symbol=symbol)
+                    if positions:
+                        for p in positions:
+                            if int(p.magic) == self.cfg.magic:
+                                ticket = int(p.ticket)
+                                break
+                    self.log.trade(
+                        event="ENTRY",
+                        symbol=symbol,
+                        direction=signal.side.value,
+                        volume=attempt_vol,
+                        price=fill,
+                        sl=sl,
+                        tp=tp,
+                        ticket=ticket,
+                        reason=signal.reason,
+                        mode="LIVE",
+                    )
+                    return ExecResult(True, ticket, fill, float(result.volume or attempt_vol), result.comment)
+
+                last_comment = (
+                    f"retcode={result.retcode} {result.comment} "
+                    f"vol={attempt_vol} free_margin={free:.2f}"
+                )
+                if result.retcode == 10019 or "money" in str(result.comment).lower():
+                    break  # shrink
+                # else try next filling
+            # Shrink and retry
+            nxt = self._shrink_volume(attempt_vol)
+            if nxt <= 0 or nxt >= attempt_vol:
+                break
+            attempt_vol = nxt
+
+        return ExecResult(False, 0, 0.0, volume, last_comment)
 
     def close_market(self, pos: OpenState, tick: Tick, reason: str) -> ExecResult:
         symbol = self.cfg.symbol
-        # PAPER / offline only — never skip the LIVE broker close because of a local cache
         if self.cfg.is_paper or not self.feed._use_mt5 or not MT5_OK:
             price = tick.bid if pos.side == Side.BUY else tick.ask
             pnl_points = (
                 (price - pos.entry) if pos.side == Side.BUY else (pos.entry - price)
             ) / self.feed.symbol_point()
-            # rough $: 1 point ≈ $1/lot for XAU when point=0.01
             pnl = pnl_points * pos.volume
             self.log.trade(
                 event="EXIT",
@@ -140,23 +228,8 @@ class TickExecutor:
             return ExecResult(True, pos.ticket, price, pos.volume, reason)
 
         assert mt5 is not None
-        # Close by opposite deal
         close_type = mt5.ORDER_TYPE_SELL if pos.side == Side.BUY else mt5.ORDER_TYPE_BUY
         price = tick.bid if pos.side == Side.BUY else tick.ask
-        request = {
-            "action": mt5.TRADE_ACTION_DEAL,
-            "symbol": symbol,
-            "volume": float(pos.volume),
-            "type": close_type,
-            "position": int(pos.ticket),
-            "price": float(price),
-            "deviation": int(self.cfg.max_slippage_points),
-            "magic": self.cfg.magic,
-            "comment": f"ATLAS_X_{reason[:12]}",
-            "type_time": mt5.ORDER_TIME_GTC,
-            "type_filling": mt5.ORDER_FILLING_IOC,
-        }
-        # If ticket is order id not position id, find position
         positions = mt5.positions_get(symbol=symbol)
         pos_id = pos.ticket
         if positions:
@@ -164,28 +237,45 @@ class TickExecutor:
                 if int(p.magic) == self.cfg.magic:
                     pos_id = int(p.ticket)
                     break
-        request["position"] = pos_id
-        result = mt5.order_send(request)
-        if result is None:
-            return ExecResult(False, pos.ticket, 0.0, pos.volume, str(mt5.last_error()))
-        ok = result.retcode == mt5.TRADE_RETCODE_DONE
-        fill = float(result.price or price)
-        pnl = 0.0
-        if ok:
-            self.log.trade(
-                event="EXIT",
-                symbol=symbol,
-                direction=pos.side.value,
-                volume=pos.volume,
-                price=fill,
-                sl=pos.sl,
-                tp=pos.tp,
-                ticket=pos_id,
-                pnl=pnl,
-                reason=reason,
-                mode="LIVE",
-            )
-        return ExecResult(ok, pos_id, fill, pos.volume, reason)
+
+        last_comment = "close failed"
+        for filling in self._filling_modes():
+            request = {
+                "action": mt5.TRADE_ACTION_DEAL,
+                "symbol": symbol,
+                "volume": float(pos.volume),
+                "type": close_type,
+                "position": pos_id,
+                "price": float(price),
+                "deviation": int(self.cfg.max_slippage_points),
+                "magic": self.cfg.magic,
+                "comment": f"ATLAS_X_{reason[:12]}",
+                "type_time": mt5.ORDER_TIME_GTC,
+                "type_filling": filling,
+            }
+            result = mt5.order_send(request)
+            if result is None:
+                last_comment = str(mt5.last_error())
+                continue
+            if result.retcode == mt5.TRADE_RETCODE_DONE:
+                fill = float(result.price or price)
+                self.log.trade(
+                    event="EXIT",
+                    symbol=symbol,
+                    direction=pos.side.value,
+                    volume=pos.volume,
+                    price=fill,
+                    sl=pos.sl,
+                    tp=pos.tp,
+                    ticket=pos_id,
+                    pnl=0.0,
+                    reason=reason,
+                    mode="LIVE",
+                )
+                return ExecResult(True, pos_id, fill, pos.volume, reason)
+            last_comment = f"retcode={result.retcode} {result.comment}"
+
+        return ExecResult(False, pos.ticket, 0.0, pos.volume, last_comment)
 
     def current_position(self) -> OpenState | None:
         if self.cfg.is_paper or not self.feed._use_mt5:

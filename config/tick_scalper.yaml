@@ -15,24 +15,27 @@ tick_scalper:
   max_spread_points: 40.0
   max_slippage_points: 30.0
 
-  # Risk
-  risk_percent: 0.25          # % of balance risked per trade
-  stop_loss_points: 80.0      # hard SL distance from entry
-  take_profit_points: 120.0   # hard TP distance (≈ 1:1.5)
-  max_open_positions: 1       # never average / never grid
+  # Risk — prefer fixed micro lot on gold (avoids "No money" from bad tick-value math)
+  use_fixed_lots: true
+  fixed_lots: 0.01
+  max_lots: 0.05            # hard cap even if risk% sizing is enabled
+  risk_percent: 0.25        # only used when use_fixed_lots: false
+  stop_loss_points: 80.0
+  take_profit_points: 120.0
+  max_open_positions: 1
   daily_loss_limit_percent: 1.5
   cooldown_ms_after_close: 500
 
   # Strategy edge filters (all must pass — never force trades)
   vwap_enabled: true
-  vwap_near_points: 50.0      # prefer entries near session VWAP
-  min_tick_momentum: 3        # last N ticks must agree with direction
+  vwap_near_points: 50.0
+  min_tick_momentum: 3
   momentum_lookback: 8
-  min_tick_range_points: 5.0  # ignore dead/flat tape
+  min_tick_range_points: 5.0
   # XAUUSD trades almost 24h Mon–Fri. [0,24) = all hours; weekends still blocked in code.
   session_hours_utc: [0, 24]
 
   # Logging
-  log_every_tick: false       # true = huge files; false = log tick summaries + events
+  log_every_tick: false
   tick_summary_every_n: 500
   log_dir: logs/tick_scalper

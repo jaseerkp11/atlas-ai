@@ -60,7 +60,10 @@ class TickEngine:
         print(f"  Symbol   : {self.cfg.symbol}")
         print(f"  Max sprd : {self.cfg.max_spread_points} pts")
         print(f"  TP / SL  : {self.cfg.take_profit_points} / {self.cfg.stop_loss_points} pts")
-        print(f"  Risk     : {self.cfg.risk_percent}% / trade")
+        if self.cfg.use_fixed_lots:
+            print(f"  Lots     : FIXED {self.cfg.fixed_lots} (cap {self.cfg.max_lots})")
+        else:
+            print(f"  Risk     : {self.cfg.risk_percent}% / trade (cap {self.cfg.max_lots} lots)")
         print(f"  Daily DD : {self.cfg.daily_loss_limit_percent}%")
         print(f"  Max open : {self.cfg.max_open_positions}")
         print("=" * 64)
@@ -162,7 +165,7 @@ class TickEngine:
         sl, tp = self.strategy.levels_for(signal.side, entry, point)
         result = self.exec.open_market(signal, volume, sl, tp)
         if not result.ok:
-            self.log.event(f"ENTRY_FAIL {result.comment}")
+            self.log.event(f"ENTRY_FAIL vol={volume} {result.comment}")
             return
 
         self._position = self.exec.current_position()
