@@ -40,7 +40,8 @@ class TradeGates:
             failures.append(
                 f"Score {score:.0f}/100 is below minimum {self.min_score}"
             )
-        if reward_risk < self.min_reward_risk:
+        # Tiny epsilon so exact 3.00 is not rejected by float noise
+        if reward_risk + 1e-9 < self.min_reward_risk:
             failures.append(
                 f"R:R {reward_risk:.2f} is below minimum {self.min_reward_risk:.2f}"
             )
