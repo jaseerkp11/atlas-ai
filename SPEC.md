@@ -2,147 +2,105 @@
 
 ## Vision
 
-ATLAS AI is an AI-powered trading intelligence platform.
+ATLAS is a disciplined, risk-managed trading system for major/minor forex pairs and gold.
 
-It does NOT automatically place trades.
-
-Its purpose is to scan markets, identify high-quality trading opportunities, explain why they are high quality, and allow the trader to make the final execution decision.
+It scores setups with transparent reasoning, enforces hard risk gates, and can execute in
+PAPER (default) or LIVE mode via MetaTrader 5. It does **not** claim a win rate or
+guaranteed edge — consistency and capital preservation come first.
 
 ---
 
 # Markets
 
-Primary
+Major / minor forex and gold (configurable in `config/settings.yaml`):
 
+- EURUSD, GBPUSD, USDJPY, AUDUSD, USDCAD, USDCHF, NZDUSD
+- EURGBP, EURJPY, GBPJPY, AUDNZD, CADJPY
 - XAUUSD
-- XAGUSD
-
-Secondary
-
-- AUDNZD
-- CADJPY
-- NZDJPY
-- EURCHF
-- CHFJPY
-
-Future
-
-- Indices
-- Crypto
-- Stocks
 
 ---
 
 # Timeframes
 
-Market Regime
-H4
+| Role | TF |
+|------|-----|
+| Market Regime | H4 |
+| Trend | H1 |
+| Setup Detection | M15 |
+| Precision Entry | M5 |
 
-Trend
-H1
-
-Setup Detection
-M15
-
-Precision Entry
-M5
+Each timeframe independently reports: trend direction, strength/confidence, swing highs/lows.
 
 ---
 
 # Core Principles
 
-Never force trades.
-
-If no setup exists:
-
-Return
-
-NO TRADE
+Never force trades. If gates fail: **NO TRADE** — with full reasoning printed either way.
 
 Capital preservation is always the priority.
 
 ---
 
-# Minimum Requirements
+# Setup Detection (reusable functions)
 
-Trend Alignment
-
-Liquidity Sweep
-
-Break of Structure
-
-Volatility Expansion
-
-Minimum 1:3 Reward Risk
-
-Confidence Score above threshold
+- Break of Structure (BOS)
+- Change of Character (CHoCH)
+- Liquidity sweeps
+- Fair value gaps
+- Order blocks
 
 ---
 
-# Confidence Score
+# Confidence Score (weights sum to 100)
 
-Trend ..........20
-
-Structure ......20
-
-Liquidity ......20
-
-Volatility .....20
-
-Risk Reward ....20
-
-Maximum
-
-100
+| Factor | Weight |
+|--------|--------|
+| H4 regime alignment | 15 |
+| H1 trend confirmation | 15 |
+| Structure break (BOS/CHoCH) | 15 |
+| Liquidity sweep | 15 |
+| Fair value gap | 10 |
+| Order block | 10 |
+| M5 trigger | 15 |
+| Volatility context | 5 |
 
 ---
 
-# Output
+# Trade Gates (single source of truth: `config/settings.yaml`)
 
-Market
+- Minimum score (default 70)
+- Minimum reward:risk (default 3.0)
 
-Confidence
-
-Entry Zone
-
-Stop Loss
-
-Take Profit
-
-Expected RR
-
-Reasons
-
-Trade Valid Until
+Both enforced in `atlas.config.TradeGates.allows()` — not duplicated elsewhere.
 
 ---
 
-# AI Role
+# Risk Management (enforced, not decorative)
 
-Explain
-
-Never Decide
+- Position size = balance × risk% ÷ stop distance (calculated size is used)
+- ATR-based stop distance
+- Pre-trade validation blocks execution: connection, session, spread, margin, conflicts
+- Daily loss limit halts **new** trades
+- Max concurrent open trades
 
 ---
 
-# Future Modules
+# Execution
 
-Market Scanner
+- `ATLAS_MODE=PAPER` (default) or `LIVE`
+- Real-time loop on each new M5 close
+- Full reasoning logged every evaluation
 
-Structure Engine
+---
 
-Liquidity Engine
+# Backtesting
 
-Volatility Engine
+Same scoring/decision code as live. Pending fills until price reaches entry.
+Reports: trades, win rate, average R, max drawdown, CSV log + explicit limitations.
 
-Rating Engine
+---
 
-AI Analyst
+# Trade Journal
 
-Replay Engine
-
-Journal
-
-Dashboard
-
-Backtester
+Every paper / backtest / live trade: time, symbol, direction, entry, stop, target,
+exit, result, R-multiple, score, reasoning.

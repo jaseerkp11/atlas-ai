@@ -1,0 +1,86 @@
+# ATLAS Trading System — Central Configuration
+# All trade gates (min score, min RR, risk limits) are defined HERE only.
+# Do not duplicate or override these thresholds in other modules.
+
+mode: PAPER  # PAPER | LIVE  — defaults to PAPER; change explicitly for live
+
+symbols:
+  - EURUSD
+  - GBPUSD
+  - USDJPY
+  - AUDUSD
+  - USDCAD
+  - USDCHF
+  - NZDUSD
+  - EURGBP
+  - EURJPY
+  - GBPJPY
+  - AUDNZD
+  - CADJPY
+  - XAUUSD
+
+timeframes:
+  regime: H4
+  trend: H1
+  setup: M15
+  entry: M5
+
+# ── Trade gates (single source of truth) ──────────────────────────────────────
+gates:
+  min_score: 70          # out of 100 — setups below this are rejected
+  min_reward_risk: 3.0   # minimum R:R before a trade is allowed
+
+# ── Scoring weights (must sum to 100) ─────────────────────────────────────────
+scoring_weights:
+  h4_regime_alignment: 15
+  h1_trend_confirmation: 15
+  structure_break: 15       # BOS and/or CHoCH
+  liquidity_sweep: 15
+  fair_value_gap: 10
+  order_block: 10
+  m5_trigger: 15
+  volatility_context: 5
+
+# ── Risk management ───────────────────────────────────────────────────────────
+risk:
+  risk_percent: 0.5          # % of account balance risked per trade
+  atr_period: 14
+  atr_stop_multiplier: 1.5   # SL distance = ATR × this
+  atr_target_multiplier: 4.5 # TP distance ≈ ATR × this (for ~1:3 RR baseline)
+  max_concurrent_trades: 3
+  daily_loss_limit_percent: 2.0  # halt NEW trades once daily loss hits this %
+  max_spread_pips:
+    default: 2.0
+    XAUUSD: 35.0
+    USDJPY: 2.5
+    GBPJPY: 3.5
+    EURJPY: 3.0
+    CADJPY: 3.0
+
+# ── Session filters (UTC hours, inclusive start / exclusive end) ──────────────
+sessions:
+  london: [7, 16]
+  new_york: [12, 21]
+  # Trade only during overlapping / active sessions
+  allowed_hours_utc: [7, 21]
+
+# ── Analysis lookbacks ────────────────────────────────────────────────────────
+analysis:
+  swing_lookback: 5
+  structure_lookback: 50
+  fvg_lookback: 30
+  order_block_lookback: 40
+  liquidity_lookback: 30
+  equal_level_tolerance_atr: 0.15
+
+# ── Backtest ──────────────────────────────────────────────────────────────────
+backtest:
+  initial_balance: 10000.0
+  history_bars_m5: 5000
+  pending_expiry_bars: 12   # cancel unfilled pending after N M5 bars
+
+# ── Paths ─────────────────────────────────────────────────────────────────────
+paths:
+  journal_dir: journals
+  log_dir: logs
+  backtest_dir: journals/backtest
