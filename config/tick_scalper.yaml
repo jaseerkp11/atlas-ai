@@ -29,7 +29,8 @@ tick_scalper:
   min_tick_momentum: 3        # last N ticks must agree with direction
   momentum_lookback: 8
   min_tick_range_points: 5.0  # ignore dead/flat tape
-  session_hours_utc: [7, 22]  # trade window
+  # XAUUSD trades almost 24h Mon–Fri. [0,24) = all hours; weekends still blocked in code.
+  session_hours_utc: [0, 24]
 
   # Logging
   log_every_tick: false       # true = huge files; false = log tick summaries + events

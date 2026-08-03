@@ -55,10 +55,14 @@ class TickRiskManager:
     def in_session(self, now: datetime | None = None) -> tuple[bool, str]:
         now = now or datetime.now(timezone.utc)
         start, end = self.cfg.session_hours_utc
+        # Gold: Fri close ~21–22 UTC, Sun open ~22 UTC (broker-dependent)
         if now.weekday() == 5:
             return False, "Saturday closed"
-        if now.weekday() == 6 and now.hour < start:
-            return False, "Sunday pre-open"
+        if now.weekday() == 6 and now.hour < 22:
+            return False, "Sunday pre-open (gold ~22:00 UTC)"
+        if now.weekday() == 4 and now.hour >= 22:
+            return False, "Friday late close / thin liquidity"
+        # end=24 means all hours 0..23 when start=0
         if start <= now.hour < end:
             return True, "session open"
         return False, f"outside session UTC [{start},{end})"
