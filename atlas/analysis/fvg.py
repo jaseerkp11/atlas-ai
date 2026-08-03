@@ -78,8 +78,27 @@ def detect_fair_value_gaps(
 def active_fvgs_for_direction(
     gaps: list[FairValueGap],
     direction: Direction,
+    *,
+    price: float | None = None,
+    atr: float | None = None,
+    max_age_bars: int | None = None,
+    current_index: int | None = None,
+    max_distance_atr: float = 3.0,
 ) -> list[FairValueGap]:
-    return [g for g in gaps if g.direction == direction and not g.filled]
+    """Unfilled FVGs in direction; optionally require recent + near live price."""
+    out: list[FairValueGap] = []
+    for g in gaps:
+        if g.direction != direction or g.filled:
+            continue
+        if max_age_bars is not None and current_index is not None:
+            if current_index - g.index > max_age_bars:
+                continue
+        if price is not None and atr is not None and atr > 0:
+            mid = (g.top + g.bottom) / 2.0
+            if abs(mid - price) > max_distance_atr * atr:
+                continue
+        out.append(g)
+    return out
 
 
 def price_in_fvg(price: float, gap: FairValueGap) -> bool:
@@ -93,15 +112,25 @@ def _is_filled(
     top: float,
     bullish: bool,
 ) -> bool:
-    """Mark filled if subsequent price fully trades through the gap."""
+    """
+    Mark filled/invalid for scalp use when price fully trades through OR
+    has already left the imbalance far behind (gap is stale context).
+    """
     if from_index >= len(df):
         return False
     for j in range(from_index, len(df)):
         low = float(df["low"].iloc[j])
         high = float(df["high"].iloc[j])
+        close = float(df["close"].iloc[j])
+        # Classic full fill
         if bullish and low <= bottom:
             return True
         if not bullish and high >= top:
+            return True
+        # Price traded deep into the gap (majority fill)
+        if bullish and low <= (bottom + top) / 2.0:
+            return True
+        if not bullish and high >= (bottom + top) / 2.0:
             return True
     return False
 

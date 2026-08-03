@@ -1,8 +1,8 @@
 """
-Watch / alert mode — updates on each NEW M5 candle close (scalp / challenge focus).
+Watch mode — updates on each NEW M5 candle close (scalp / challenge).
 
-Does NOT invent a win rate. High score + S/R confluence filters for quality.
-Optional auto-execute when --execute is passed (respects ATLAS_MODE).
+"watch poll" lines = heartbeat only (waiting for next M5 close).
+Full signal cards print only when a new M5 bar appears in MT5.
 """
 
 from __future__ import annotations
@@ -10,8 +10,11 @@ from __future__ import annotations
 import csv
 import logging
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Callable
+
+import pandas as pd
 
 from atlas.analysis.levels import build_sr_map
 from atlas.analysis.setups import detect_setup
@@ -44,13 +47,26 @@ SIGNAL_FIELDS = [
 ]
 
 
+def _bar_key(ts) -> str:
+    """Normalize bar time so equality checks are reliable across dtypes."""
+    return str(pd.Timestamp(ts))
+
+
+def _next_m5_close_utc(now: datetime | None = None) -> datetime:
+    now = now or datetime.now(timezone.utc)
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=timezone.utc)
+    minute = (now.minute // 5) * 5
+    base = now.replace(minute=minute, second=0, microsecond=0)
+    nxt = base + timedelta(minutes=5)
+    return nxt
+
+
 class SignalJournal:
     def __init__(self, path=None) -> None:
         settings = load_settings()
         journal_dir = ROOT / settings.paths["journal_dir"]
         journal_dir.mkdir(parents=True, exist_ok=True)
-        from pathlib import Path
-
         self.path = Path(path) if path else journal_dir / "signals.csv"
         if not self.path.exists() or self.path.stat().st_size == 0:
             with open(self.path, "w", newline="", encoding="utf-8") as f:
@@ -69,9 +85,9 @@ def format_watch_card(
     execute_armed: bool,
 ) -> str:
     f = decision.features
-    action = "SCALP WATCH — mark S/R on chart"
+    action = "SCALP WATCH — mark near S/R on chart"
     if decision.allowed:
-        action = "SCALP SETUP QUALIFIED — review / execute path"
+        action = "SCALP SETUP QUALIFIED"
         if execute_armed:
             action = "SCALP EXECUTE (gates passed)"
 
@@ -95,13 +111,16 @@ def format_watch_card(
         lines.append(
             f"║  Resistance   : {sr.nearest_resistance.price:.5f}  ({sr.nearest_resistance.strength})"
         )
-    lines.append("║  Draw on TradingView / MT5:")
-    for lvl in (sr.resistances[:3] + sr.supports[:3]):
+    lines.append("║  Near S/R (draw these — stale far levels hidden):")
+    shown = (sr.resistances[:3] + sr.supports[:3])
+    if not shown:
+        lines.append("║    (none within proximity filter)")
+    for lvl in shown:
         tag = "RES" if lvl.kind == "resistance" else "SUP"
         lines.append(
             f"║    {tag} {lvl.price:.5f}  [{'+'.join(lvl.timeframes)}] {lvl.strength}"
         )
-    lines.append("║  Why:")
+    lines.append("║  Why (fresh structure only — old filled FVG/OB ignored):")
     for factor in decision.score.factors:
         mark = "✓" if factor.passed else "✗"
         lines.append(f"║    {mark} {factor.name}: {factor.reason}")
@@ -126,7 +145,7 @@ class WatchLoop:
         self.execute = execute
         self.on_log = on_log or (lambda m: print(m, flush=True))
         self.signals = SignalJournal()
-        self._last_bar: dict[str, object] = {}
+        self._last_bar: dict[str, str] = {}
         self._running = False
         self.engine: ExecutionEngine | None = None
         if execute:
@@ -139,31 +158,31 @@ class WatchLoop:
             )
 
     def start(self, max_cycles: int | None = None) -> None:
-        settings = load_settings()
+        settings = load_settings(reload=True)
         if not self.broker.connect():
             self.on_log("FATAL: broker connect failed")
             return
 
-        signal_tf = str(settings.analysis.get("watch_signal_timeframe", "M5")).upper()
-        interval = int(settings.analysis.get("watch_interval_seconds", 15))
+        signal_tf = "M5"  # forced for scalp watch — do not use M15
+        interval = int(settings.analysis.get("watch_interval_seconds", 10))
+        self.on_log("=" * 60)
         self.on_log(
-            f"WATCH/SCALP started | signal on each NEW {signal_tf} close | poll={interval}s | "
+            f"M5 SCALP WATCH v2 | cards on each NEW M5 close | poll={interval}s"
+        )
+        self.on_log(
             f"min_score={settings.gates.min_score} | min_rr=1:{settings.gates.min_reward_risk:g} | "
             f"execute={self.execute} | risk={settings.risk.risk_percent}% | "
             f"data={'LIVE_MT5' if self.broker.using_live_market_data else 'SYNTHETIC'}"
         )
         self.on_log(
-            "Challenge scalp mode: small risk, tight ATR stop, 1:3 target, score>=75. "
-            "No guaranteed win rate."
+            "Heartbeat lines = waiting. Full cards appear only after a new 5m candle closes."
+        )
+        self.on_log(
+            "FVG/OB older than ~2h or far from price are ignored (fixes stale hours-old zones)."
         )
         if self.execute and settings.is_live:
-            self.on_log(
-                "EXECUTE + LIVE — qualifying M5 scalps send orders to the connected account."
-            )
-        elif self.execute:
-            self.on_log("Execute armed but mode is not LIVE — orders stay simulated.")
-        else:
-            self.on_log("Alerts only. Add --execute to send orders when gates pass.")
+            self.on_log("EXECUTE + LIVE armed.")
+        self.on_log("=" * 60)
 
         self._running = True
         cycles = 0
@@ -187,32 +206,44 @@ class WatchLoop:
     def _cycle(self, signal_tf: str) -> None:
         settings = load_settings()
         now = datetime.now(timezone.utc)
-        self.on_log(f"[{now.strftime('%H:%M:%S')} UTC] polling {signal_tf} closes…")
+        nxt = _next_m5_close_utc(now)
+        wait_s = max(0, int((nxt - now).total_seconds()))
+        self.on_log(
+            f"[{now.strftime('%H:%M:%S')} UTC] heartbeat — next M5 boundary ~{nxt.strftime('%H:%M')} UTC "
+            f"(in ~{wait_s}s). Waiting for NEW M5 bar from MT5…"
+        )
 
+        any_new = False
         for symbol in settings.symbols:
             try:
-                self._process_symbol(symbol, signal_tf)
+                if self._process_symbol(symbol, signal_tf):
+                    any_new = True
             except Exception as exc:
                 logger.exception(symbol)
                 self.on_log(f"Error {symbol}: {exc}")
+        if not any_new:
+            self.on_log("  (no new M5 closes yet — this is normal between candles)")
 
-    def _process_symbol(self, symbol: str, signal_tf: str) -> None:
+    def _process_symbol(self, symbol: str, signal_tf: str) -> bool:
         frames = {
             "M5": self.broker.copy_rates(symbol, "M5", 400),
             "M15": self.broker.copy_rates(symbol, "M15", 300),
             "H1": self.broker.copy_rates(symbol, "H1", 200),
             "H4": self.broker.copy_rates(symbol, "H4", 150),
         }
-        bar_df = frames.get(signal_tf) or frames.get("M5")
+        bar_df = frames.get(signal_tf)
+        if bar_df is None:
+            bar_df = frames.get("M5")
         if bar_df is None or len(bar_df) < 40:
-            return
+            return False
 
         last_t = bar_df["time"].iloc[-1]
+        key = _bar_key(last_t)
         prev = self._last_bar.get(symbol)
-        if prev is not None and last_t <= prev:
-            return
-        self._last_bar[symbol] = last_t
-        self.on_log(f"\n>>> {symbol}: new {signal_tf} close @ {last_t}")
+        if prev is not None and key == prev:
+            return False
+        self._last_bar[symbol] = key
+        self.on_log(f"\n>>> {symbol}: NEW M5 close @ {key}")
 
         bid, ask = self.broker.current_price(symbol)
         mid = (bid + ask) / 2.0
@@ -221,9 +252,7 @@ class WatchLoop:
         features = detect_setup(symbol, frames)
         if features is None:
             self.on_log(f"{symbol}: insufficient data for setup")
-            for line in sr.chart_lines():
-                self.on_log(line)
-            return
+            return True
 
         decision = evaluate_setup(features)
         card = format_watch_card(decision, sr, bid, ask, execute_armed=bool(self.execute))
@@ -231,9 +260,9 @@ class WatchLoop:
 
         watch_note = (
             f"Draw SUP {sr.nearest_support.price:.5f} / "
-            f"RES {sr.nearest_resistance.price:.5f} on chart"
+            f"RES {sr.nearest_resistance.price:.5f}"
             if sr.nearest_support and sr.nearest_resistance
-            else "Mark printed S/R on chart"
+            else "Mark near S/R"
         )
         self.signals.log(
             {
@@ -258,7 +287,5 @@ class WatchLoop:
         if self.execute and decision.allowed and self.engine is not None:
             self.engine.try_execute(decision)
         elif decision.allowed:
-            self.on_log(
-                f"→ {symbol}: qualifies (score {decision.score.total}). "
-                f"Confirm on chart before trading."
-            )
+            self.on_log(f"→ {symbol}: qualifies (score {decision.score.total}).")
+        return True

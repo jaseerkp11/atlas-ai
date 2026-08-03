@@ -60,18 +60,22 @@ risk:
 sessions:
   london: [7, 16]
   new_york: [12, 21]
-  allowed_hours_utc: [7, 21]
+  # Inclusive start / exclusive end — cover full London+NY (DST-aware buffer)
+  allowed_hours_utc: [7, 23]
 
 analysis:
   swing_lookback: 4
   structure_lookback: 50
-  fvg_lookback: 30
-  order_block_lookback: 40
-  liquidity_lookback: 30
+  fvg_lookback: 24              # only search recent M5 bars (~2h)
+  order_block_lookback: 24
+  liquidity_lookback: 20
   equal_level_tolerance_atr: 0.15
-  watch_signal_timeframe: M5   # emit signal card on each NEW M5 close
-  watch_interval_seconds: 15   # poll MT5 often so M5 closes are caught quickly
-  scalp_market_entry: true     # enter near live price (scalp), stop from structure/ATR
+  structure_max_age_bars: 24   # ignore FVG/OB older than this many setup bars
+  structure_proximity_atr: 3.0 # ignore FVG/OB farther than 3×ATR from live price
+  watch_signal_timeframe: M5
+  watch_interval_seconds: 10
+  scalp_market_entry: true
+  sr_proximity_atr: 8.0        # only show S/R near price on watch cards
 
 backtest:
   initial_balance: 10000.0

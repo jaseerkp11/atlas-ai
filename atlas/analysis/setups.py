@@ -95,8 +95,37 @@ def detect_setup(
     if direction == Direction.NEUTRAL and sweep is not None:
         direction = sweep.direction
 
-    active_fvg = active_fvgs_for_direction(fvgs, direction) if direction != Direction.NEUTRAL else []
-    active_ob = active_order_blocks(obs, direction) if direction != Direction.NEUTRAL else []
+    price_now = float(m5["close"].iloc[-1])
+    max_age = int(settings.analysis.get("structure_max_age_bars", 24))
+    prox = float(settings.analysis.get("structure_proximity_atr", 3.0))
+    cur_idx = len(setup_df) - 1
+
+    active_fvg = (
+        active_fvgs_for_direction(
+            fvgs,
+            direction,
+            price=price_now,
+            atr=atr_val,
+            max_age_bars=max_age,
+            current_index=cur_idx,
+            max_distance_atr=prox,
+        )
+        if direction != Direction.NEUTRAL
+        else []
+    )
+    active_ob = (
+        active_order_blocks(
+            obs,
+            direction,
+            price=price_now,
+            atr=atr_val,
+            max_age_bars=max_age,
+            current_index=cur_idx,
+            max_distance_atr=prox,
+        )
+        if direction != Direction.NEUTRAL
+        else []
+    )
 
     m5_trigger = _detect_m5_trigger(m5, direction, analyses.get("M5"))
     vol_df = m15 if m15 is not None and len(m15) >= 30 else setup_df

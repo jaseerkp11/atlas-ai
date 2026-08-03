@@ -78,11 +78,11 @@ def build_sr_map(
 ) -> SRMap:
     """
     Cluster swing highs/lows across H4/H1/M15 into support & resistance zones.
-    Multi-TF confluence → stronger level (closer to what discretionary traders mark on TV).
+    Multi-TF confluence → stronger level. Near-price levels preferred for scalp cards.
     """
     settings = load_settings()
     swing_lb = int(settings.analysis.get("swing_lookback", 5))
-    raw: list[tuple[float, str, str]] = []  # price, kind, timeframe
+    raw: list[tuple[float, str, str]] = []
 
     for tf in ("H4", "H1", "M15", "M5"):
         df = frames.get(tf)
@@ -95,11 +95,14 @@ def build_sr_map(
             raw.append((s.price, "support", tf))
 
     if mid is None:
-        m15 = frames.get("M15") or frames.get("M5")
+        m15 = frames.get("M15")
+        if m15 is None:
+            m15 = frames.get("M5")
         mid = float(m15["close"].iloc[-1]) if m15 is not None and len(m15) else 0.0
 
-    # ATR-ish cluster tolerance from M15 range
     m15 = frames.get("M15")
+    if m15 is None:
+        m15 = frames.get("M5")
     if m15 is not None and len(m15) >= 20:
         atr_proxy = float((m15["high"] - m15["low"]).tail(20).mean())
     else:
@@ -109,7 +112,12 @@ def build_sr_map(
     supports = _cluster(raw, "support", tol, mid, symbol)
     resistances = _cluster(raw, "resistance", tol, mid, symbol)
 
-    # Nearest levels
+    # Keep only levels near live price for scalp watch cards
+    prox = float(settings.analysis.get("sr_proximity_atr", 8.0))
+    max_dist = atr_proxy * prox
+    supports = [s for s in supports if abs(s.price - mid) <= max_dist]
+    resistances = [r for r in resistances if abs(r.price - mid) <= max_dist]
+
     below = [s for s in supports if s.price <= mid]
     above = [r for r in resistances if r.price >= mid]
     nearest_s = max(below, key=lambda x: x.price) if below else None
@@ -121,7 +129,6 @@ def build_sr_map(
     if nearest_r:
         nearest_r.distance_pips = abs(nearest_r.price - mid) / pip
 
-    # Sort: resistance descending, support descending (nearest first for supports near price)
     resistances.sort(key=lambda x: x.price)
     supports.sort(key=lambda x: x.price, reverse=True)
 

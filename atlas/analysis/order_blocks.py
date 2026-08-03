@@ -92,8 +92,27 @@ def detect_order_blocks(
 def active_order_blocks(
     blocks: list[OrderBlock],
     direction: Direction,
+    *,
+    price: float | None = None,
+    atr: float | None = None,
+    max_age_bars: int | None = None,
+    current_index: int | None = None,
+    max_distance_atr: float = 3.0,
 ) -> list[OrderBlock]:
-    return [b for b in blocks if b.direction == direction and not b.mitigated]
+    """Active OBs in direction; optionally require recent + near live price."""
+    out: list[OrderBlock] = []
+    for b in blocks:
+        if b.direction != direction or b.mitigated:
+            continue
+        if max_age_bars is not None and current_index is not None:
+            if current_index - b.index > max_age_bars:
+                continue
+        if price is not None and atr is not None and atr > 0:
+            mid = (b.top + b.bottom) / 2.0
+            if abs(mid - price) > max_distance_atr * atr:
+                continue
+        out.append(b)
+    return out
 
 
 def price_in_order_block(price: float, block: OrderBlock, buffer: float = 0.0) -> bool:
@@ -107,12 +126,20 @@ def _mitigated(
     top: float,
     direction: Direction,
 ) -> bool:
-    """OB mitigated when price closes through the far side of the zone."""
+    """OB mitigated when price closes through the zone or leaves it far behind."""
     for j in range(from_index, len(df)):
         close = float(df["close"].iloc[j])
+        high = float(df["high"].iloc[j])
+        low = float(df["low"].iloc[j])
         if direction == Direction.LONG and close < bottom:
             return True
         if direction == Direction.SHORT and close > top:
+            return True
+        # Traded through the midpoint = used / no longer fresh for scalp
+        mid = (top + bottom) / 2.0
+        if direction == Direction.LONG and low <= mid:
+            return True
+        if direction == Direction.SHORT and high >= mid:
             return True
     return False
 
