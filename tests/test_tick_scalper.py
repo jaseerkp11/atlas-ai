@@ -33,7 +33,8 @@ def test_config_loads_xauusd():
     assert cfg.max_lots == 1.0
     assert cfg.rapid_cycle is True
     assert cfg.instant_profit_points > 0
-    assert cfg.pyramid_winners_only is True
+    assert cfg.max_open_positions >= 2
+    assert cfg.pyramid_winners_only is False
     assert len(cfg.profit_ladder_points) >= 2
 
 
