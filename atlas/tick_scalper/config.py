@@ -35,10 +35,14 @@ class TickScalperConfig:
     stop_loss_points: float
     take_profit_points: float
     max_open_positions: int
+    burst_fill: bool
     pyramid_winners_only: bool
     min_points_between_entries: float
     daily_loss_limit_percent: float
     cooldown_ms_after_close: int
+    use_m1_price_action: bool
+    m1_structure_bars: int
+    m1_poll_seconds: float
     micro_tf_seconds: int
     require_micro_bar_close: bool
     micro_bars_agree: int
@@ -108,20 +112,24 @@ def load_tick_config(reload: bool = False) -> TickScalperConfig:
         stop_loss_points=float(t["stop_loss_points"]),
         take_profit_points=float(t["take_profit_points"]),
         max_open_positions=int(t["max_open_positions"]),
+        burst_fill=bool(t.get("burst_fill", True)),
         pyramid_winners_only=bool(t.get("pyramid_winners_only", False)),
         min_points_between_entries=float(t.get("min_points_between_entries", 0.0)),
         daily_loss_limit_percent=float(t["daily_loss_limit_percent"]),
         cooldown_ms_after_close=int(t["cooldown_ms_after_close"]),
+        use_m1_price_action=bool(t.get("use_m1_price_action", True)),
+        m1_structure_bars=int(t.get("m1_structure_bars", 12)),
+        m1_poll_seconds=float(t.get("m1_poll_seconds", 1)),
         micro_tf_seconds=int(t.get("micro_tf_seconds", 5)),
-        require_micro_bar_close=bool(t.get("require_micro_bar_close", True)),
-        micro_bars_agree=int(t.get("micro_bars_agree", 2)),
-        use_m1_filter=bool(t.get("use_m1_filter", True)),
+        require_micro_bar_close=bool(t.get("require_micro_bar_close", False)),
+        micro_bars_agree=int(t.get("micro_bars_agree", 1)),
+        use_m1_filter=bool(t.get("use_m1_filter", False)),
         m1_lookback=int(t.get("m1_lookback", 3)),
-        vwap_enabled=bool(t["vwap_enabled"]),
-        vwap_near_points=float(t["vwap_near_points"]),
-        min_tick_momentum=int(t["min_tick_momentum"]),
-        momentum_lookback=int(t["momentum_lookback"]),
-        min_tick_range_points=float(t["min_tick_range_points"]),
+        vwap_enabled=bool(t.get("vwap_enabled", False)),
+        vwap_near_points=float(t.get("vwap_near_points", 80.0)),
+        min_tick_momentum=int(t.get("min_tick_momentum", 1)),
+        momentum_lookback=int(t.get("momentum_lookback", 2)),
+        min_tick_range_points=float(t.get("min_tick_range_points", 0.0)),
         session_hours_utc=(int(hours[0]), int(hours[1])),
         log_every_tick=bool(t["log_every_tick"]),
         tick_summary_every_n=int(t["tick_summary_every_n"]),

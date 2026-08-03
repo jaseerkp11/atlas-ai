@@ -1,23 +1,19 @@
 """
-Tick strategy — RAPID CYCLE with M1 + synthetic 5s/1s micro-candle filters.
+Tick strategy — PURE M1 price action.
 
-Entry requires:
-  - tick momentum + spread
-  - last closed micro-bar(s) agree (1s or 5s built from ticks)
-  - optional M1 candle alignment (broker PERIOD_M1)
-
-Exit still every tick for instant profit / SL (high-speed close).
+No micro-TF indicators, no VWAP, no tick-momentum gates.
+Direction comes only from the 1-minute chart structure.
+Exits still evaluated every tick for instant profit / SL.
 """
 
 from __future__ import annotations
 
-from collections import deque
 from dataclasses import dataclass
 from enum import Enum
 from typing import Optional
 
 from atlas.tick_scalper.config import TickScalperConfig, load_tick_config
-from atlas.tick_scalper.micro_bars import MicroBar, MicroBarBuilder, fetch_m1_micro_trend
+from atlas.tick_scalper.m1_price_action import M1Bias, read_m1_price_action
 from atlas.tick_scalper.mt5_feed import Tick
 
 
@@ -32,6 +28,7 @@ class Signal:
     reason: str
     bid: float
     ask: float
+    m1_bar_time: int = 0
 
 
 @dataclass
@@ -50,155 +47,64 @@ class OpenState:
 class TickStrategy:
     def __init__(self, cfg: TickScalperConfig | None = None) -> None:
         self.cfg = cfg or load_tick_config()
-        self._mids: deque[float] = deque(maxlen=max(32, self.cfg.momentum_lookback * 4))
-        self._vwap_num = 0.0
-        self._vwap_den = 0.0
-        self._vwap_day = -1
-        self.micro = MicroBarBuilder(period_seconds=self.cfg.micro_tf_seconds)
-        self._last_closed_micro: Optional[MicroBar] = None
-        self._m1_cache: Optional[str] = None
-        self._m1_cache_bucket: int = -1
         self._use_mt5 = False
+        self._bias: Optional[M1Bias] = None
+        self._last_poll_s: float = 0.0
+        self._last_burst_bar: int = 0
 
     def set_mt5_live(self, live: bool) -> None:
         self._use_mt5 = bool(live)
 
-    def _reset_vwap_if_new_day(self, tick: Tick) -> None:
-        day = int(tick.time_msc // 86_400_000)
-        if day != self._vwap_day:
-            self._vwap_day = day
-            self._vwap_num = 0.0
-            self._vwap_den = 0.0
-
     def update(self, tick: Tick, point: float) -> None:
-        self._mids.append(tick.mid)
-        closed = self.micro.on_tick(tick)
-        if closed is not None:
-            self._last_closed_micro = closed
-        if self.cfg.vwap_enabled:
-            self._reset_vwap_if_new_day(tick)
-            vol = max(1.0, float(tick.volume or 1))
-            self._vwap_num += tick.mid * vol
-            self._vwap_den += vol
+        """Refresh M1 bias about once per second (cheap)."""
+        import time
+
+        now = time.time()
+        poll = max(0.5, float(getattr(self.cfg, "m1_poll_seconds", 1) or 1))
+        if now - self._last_poll_s < poll and self._bias is not None:
+            return
+        self._last_poll_s = now
+        self._bias = read_m1_price_action(
+            self.cfg.symbol,
+            self._use_mt5,
+            structure_bars=int(getattr(self.cfg, "m1_structure_bars", 12) or 12),
+        )
 
     @property
-    def vwap(self) -> float:
-        if self._vwap_den <= 0:
-            return 0.0
-        return self._vwap_num / self._vwap_den
-
-    def _m1_direction(self, tick: Tick) -> Optional[str]:
-        # Refresh at most once per M1 bucket
-        bucket = int(tick.time_msc // 60_000)
-        if bucket == self._m1_cache_bucket and self._m1_cache is not None:
-            return self._m1_cache
-        direction = fetch_m1_micro_trend(
-            self.cfg.symbol, self._use_mt5, lookback=self.cfg.m1_lookback
-        )
-        self._m1_cache_bucket = bucket
-        self._m1_cache = direction
-        return direction
+    def current_bias(self) -> Optional[M1Bias]:
+        return self._bias
 
     def evaluate_entry(self, tick: Tick, point: float) -> Signal | None:
         spread_pts = tick.spread_points(point)
         if spread_pts > self.cfg.max_spread_points:
             return None
 
-        # Prefer entries right as a micro-bar closes (cleaner edge)
-        if self.cfg.require_micro_bar_close and self.micro._just_closed is None:
-            return None
-
-        need = self.cfg.momentum_lookback + 1
-        if len(self._mids) < need:
-            return None
-
-        mids = list(self._mids)
-        window = mids[-need:]
-        rng = (max(window) - min(window)) / point
-        if rng < self.cfg.min_tick_range_points:
-            return None
-
-        ups = sum(1 for i in range(1, len(window)) if window[i] > window[i - 1])
-        downs = sum(1 for i in range(1, len(window)) if window[i] < window[i - 1])
-
-        side: Side | None = None
-        reason_parts: list[str] = []
-
-        if ups >= self.cfg.min_tick_momentum and ups > downs:
-            side = Side.BUY
-            reason_parts.append(f"tick-mom up {ups}/{self.cfg.momentum_lookback}")
-        elif downs >= self.cfg.min_tick_momentum and downs > ups:
-            side = Side.SELL
-            reason_parts.append(f"tick-mom down {downs}/{self.cfg.momentum_lookback}")
-        else:
-            return None
-
-        if self.cfg.rapid_cycle and len(window) >= 2:
-            last_up = window[-1] > window[-2]
-            if side == Side.BUY and not last_up:
+        bias = self._bias
+        if bias is None:
+            # Offline / synthetic fallback: tiny mid move only for plumbing tests
+            if not self._use_mt5:
                 return None
-            if side == Side.SELL and last_up:
-                return None
+            return None
 
-        # --- Micro TF filter (1s or 5s synthetic candles) ---
-        n_agree = max(1, self.cfg.micro_bars_agree)
-        if len(self.micro.closed) < n_agree:
-            return None
-        last = self.micro.last_closed
-        assert last is not None
-        if side == Side.BUY and not last.bullish:
-            return None
-        if side == Side.SELL and not last.bearish:
-            return None
-        if not self.micro.last_n_agree(side == Side.BUY, n_agree):
-            return None
-        reason_parts.append(
-            f"{self.cfg.micro_tf_seconds}s×{n_agree} "
-            f"{'bull' if side == Side.BUY else 'bear'} "
-            f"O={last.open:.2f} C={last.close:.2f}"
+        side = Side.BUY if bias.side == "BUY" else Side.SELL
+        return Signal(
+            side=side,
+            reason=f"M1 PA | {bias.reason} | spread={spread_pts:.1f}pts",
+            bid=tick.bid,
+            ask=tick.ask,
+            m1_bar_time=bias.bar_time,
         )
 
-        # --- M1 filter (broker candle) ---
-        if self.cfg.use_m1_filter:
-            m1 = self._m1_direction(tick)
-            if m1 is None and self._use_mt5:
-                return None  # wait until M1 data available
-            if m1 is not None and m1 != side.value:
-                return None
-            if m1 is not None:
-                reason_parts.append(f"M1={m1}")
+    def mark_burst_bar(self, bar_time: int) -> None:
+        self._last_burst_bar = bar_time
 
-        vwap = self.vwap
-        if self.cfg.vwap_enabled and vwap > 0:
-            dist_pts = abs(tick.mid - vwap) / point
-            near = dist_pts <= self.cfg.vwap_near_points
-            if side == Side.BUY and tick.mid < vwap and not near:
-                return None
-            if side == Side.SELL and tick.mid > vwap and not near:
-                return None
-            reason_parts.append(f"VWAP={vwap:.2f}")
-
-        reason_parts.append(f"spread={spread_pts:.1f}pts")
-        # Consume just-closed flag so we don't re-fire every tick in same bar
-        if self.cfg.require_micro_bar_close:
-            self.micro._just_closed = None
-
-        return Signal(side=side, reason=" | ".join(reason_parts), bid=tick.bid, ask=tick.ask)
+    def already_burst_this_bar(self, bar_time: int) -> bool:
+        return bar_time != 0 and bar_time == self._last_burst_bar
 
     def _unrealized_points(self, tick: Tick, pos: OpenState, point: float) -> float:
         if pos.side == Side.BUY:
             return (tick.bid - pos.entry) / point
         return (pos.entry - tick.ask) / point
-
-    def _momentum_fading(self, side: Side) -> bool:
-        if len(self._mids) < self.cfg.momentum_lookback + 1:
-            return False
-        window = list(self._mids)[-(self.cfg.momentum_lookback + 1) :]
-        ups = sum(1 for i in range(1, len(window)) if window[i] > window[i - 1])
-        downs = sum(1 for i in range(1, len(window)) if window[i] < window[i - 1])
-        if side == Side.BUY:
-            return downs >= self.cfg.min_tick_momentum and downs > ups
-        return ups >= self.cfg.min_tick_momentum and ups > downs
 
     def evaluate_exit(self, tick: Tick, pos: OpenState, point: float) -> str | None:
         pnl_pts = self._unrealized_points(tick, pos, point)
@@ -218,16 +124,13 @@ class TickStrategy:
             if tick.ask >= pos.sl:
                 return "stop_loss"
 
-        # Micro-bar flip while green → bank profit
-        just = self.micro._just_closed
-        if just is not None and pnl_pts > 0:
-            if pos.side == Side.BUY and just.bearish:
-                return "micro_bar_fade_profit"
-            if pos.side == Side.SELL and just.bullish:
-                return "micro_bar_fade_profit"
-
-        if self.cfg.rapid_cycle and pnl_pts > 0 and self._momentum_fading(pos.side):
-            return "rapid_fade_profit"
+        # If M1 structure flipped against us while green → bank
+        bias = self._bias
+        if bias is not None and pnl_pts > 0:
+            if pos.side == Side.BUY and bias.side == "SELL":
+                return "m1_flip_profit"
+            if pos.side == Side.SELL and bias.side == "BUY":
+                return "m1_flip_profit"
 
         return None
 
