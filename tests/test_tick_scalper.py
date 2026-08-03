@@ -24,6 +24,9 @@ def test_config_m1_burst():
     assert cfg.burst_fill is True
     assert cfg.use_m1_price_action is True
     assert cfg.fixed_lots == 1.0
+    assert cfg.instant_profit_points == 1.5
+    assert cfg.alternate_batch_side is True
+    assert cfg.require_flat_before_next_batch is True
     assert cfg.require_micro_bar_close is False
     assert cfg.vwap_enabled is False
 
@@ -71,14 +74,25 @@ def test_instant_profit_exit():
     strat = TickStrategy(cfg)
     point = cfg.point_size
     entry = 4050.0
-    target = 5.0
+    target = 1.5
     sl, tp = strat.levels_for(Side.BUY, entry, point, spread_points=20)
     pos = OpenState(
         side=Side.BUY, entry=entry, sl=sl, tp=tp, volume=1.0, ticket=1, profit_target_points=target
     )
-    bid = entry + (target + 1) * point
+    bid = entry + (target + 0.2) * point
     tick = Tick(2, bid, bid + 0.2, bid, 1)
     assert strat.evaluate_exit(tick, pos, point) == "instant_profit"
+
+
+def test_alternate_side_logic():
+    from atlas.tick_scalper.engine import TickEngine
+
+    eng = TickEngine(load_tick_config(reload=True))
+    assert eng._required_side() is None
+    eng._last_batch_side = Side.BUY
+    assert eng._required_side() == Side.SELL
+    eng._last_batch_side = Side.SELL
+    assert eng._required_side() == Side.BUY
 
 
 def test_hard_sl_exit():

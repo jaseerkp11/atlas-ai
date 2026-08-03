@@ -36,6 +36,8 @@ class TickScalperConfig:
     take_profit_points: float
     max_open_positions: int
     burst_fill: bool
+    alternate_batch_side: bool
+    require_flat_before_next_batch: bool
     pyramid_winners_only: bool
     min_points_between_entries: float
     daily_loss_limit_percent: float
@@ -113,6 +115,8 @@ def load_tick_config(reload: bool = False) -> TickScalperConfig:
         take_profit_points=float(t["take_profit_points"]),
         max_open_positions=int(t["max_open_positions"]),
         burst_fill=bool(t.get("burst_fill", True)),
+        alternate_batch_side=bool(t.get("alternate_batch_side", True)),
+        require_flat_before_next_batch=bool(t.get("require_flat_before_next_batch", True)),
         pyramid_winners_only=bool(t.get("pyramid_winners_only", False)),
         min_points_between_entries=float(t.get("min_points_between_entries", 0.0)),
         daily_loss_limit_percent=float(t["daily_loss_limit_percent"]),
