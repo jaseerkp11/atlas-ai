@@ -43,6 +43,7 @@ class OpenState:
     ticket: int
     vwap_at_entry: float = 0.0
     opened_msc: int = 0
+    profit_target_points: float = 0.0  # per-slot ladder target
 
 
 class TickStrategy:
@@ -147,9 +148,10 @@ class TickStrategy:
         Every tick. Instant-profit first so winners close ASAP and cycle restarts.
         """
         pnl_pts = self._unrealized_points(tick, pos, point)
+        target = pos.profit_target_points or self.cfg.instant_profit_points
 
-        # 1) INSTANT PROFIT — bank as soon as threshold hit (rapid machine)
-        if pnl_pts >= self.cfg.instant_profit_points:
+        # 1) INSTANT / LADDER PROFIT — bank this slot ASAP
+        if pnl_pts >= target:
             return "instant_profit"
 
         # 2) Hard broker levels

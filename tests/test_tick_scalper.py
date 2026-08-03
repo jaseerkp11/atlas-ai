@@ -24,7 +24,7 @@ def _paper_mode(monkeypatch):
 def test_config_loads_xauusd():
     cfg = load_tick_config(reload=True)
     assert cfg.symbol == "XAUUSD"
-    assert cfg.max_open_positions == 1
+    assert cfg.max_open_positions >= 2
     assert cfg.take_profit_points > 0
     assert cfg.stop_loss_points > 0
     assert cfg.mode == "PAPER"
@@ -33,6 +33,8 @@ def test_config_loads_xauusd():
     assert cfg.max_lots == 1.0
     assert cfg.rapid_cycle is True
     assert cfg.instant_profit_points > 0
+    assert cfg.pyramid_winners_only is True
+    assert len(cfg.profit_ladder_points) >= 2
 
 
 def test_fixed_lot_sizing():
@@ -105,10 +107,43 @@ def test_instant_profit_closes_asap():
     point = cfg.point_size
     entry = 4050.0
     sl, tp = strat.levels_for(Side.BUY, entry, point)
-    pos = OpenState(side=Side.BUY, entry=entry, sl=sl, tp=tp, volume=1.0, ticket=9)
-    bid = entry + (cfg.instant_profit_points + 0.5) * point
+    target = cfg.profit_target_for_slot(0)
+    pos = OpenState(
+        side=Side.BUY,
+        entry=entry,
+        sl=sl,
+        tp=tp,
+        volume=1.0,
+        ticket=9,
+        profit_target_points=target,
+    )
+    bid = entry + (target + 0.5) * point
     tick = Tick(time_msc=3, bid=bid, ask=bid + 0.2, last=bid, volume=1)
     assert strat.evaluate_exit(tick, pos, point) == "instant_profit"
+
+
+def test_multi_paper_positions_independent_exits():
+    from atlas.tick_scalper.execution import TickExecutor
+    from atlas.tick_scalper.logger import TickLogger
+    from atlas.tick_scalper.mt5_feed import MT5TickFeed
+    from atlas.tick_scalper.strategy import Signal
+
+    cfg = load_tick_config(reload=True)
+    feed = MT5TickFeed(cfg)
+    feed.connect()
+    feed._use_mt5 = False
+    ex = TickExecutor(feed, TickLogger(), cfg)
+    sig = Signal(side=Side.BUY, reason="t", bid=4050.0, ask=4050.2)
+    r1 = ex.open_market(sig, 1.0, 4040.0, 4060.0, profit_target_points=5.0)
+    r2 = ex.open_market(sig, 1.0, 4040.0, 4060.0, profit_target_points=8.0)
+    assert r1.ok and r2.ok
+    assert len(ex.current_positions()) == 2
+    # Close only first
+    tick = Tick(1, 4050.5, 4050.7, 4050.5, 1)
+    pos0 = ex.current_positions()[0]
+    ex.close_market(pos0, tick, "instant_profit")
+    assert len(ex.current_positions()) == 1
+    feed.disconnect()
 
 
 def test_hard_sl_exit():

@@ -31,9 +31,12 @@ class TickScalperConfig:
     risk_percent: float
     rapid_cycle: bool
     instant_profit_points: float
+    profit_ladder_points: tuple[float, ...]
     stop_loss_points: float
     take_profit_points: float
     max_open_positions: int
+    pyramid_winners_only: bool
+    min_points_between_entries: float
     daily_loss_limit_percent: float
     cooldown_ms_after_close: int
     vwap_enabled: bool
@@ -58,6 +61,12 @@ class TickScalperConfig:
     def point_size(self) -> float:
         return 0.01
 
+    def profit_target_for_slot(self, slot_index: int) -> float:
+        """Staggered take-profit points for multi-entry ladder."""
+        if self.profit_ladder_points:
+            return float(self.profit_ladder_points[slot_index % len(self.profit_ladder_points)])
+        return self.instant_profit_points
+
 
 _CFG: TickScalperConfig | None = None
 
@@ -76,6 +85,7 @@ def load_tick_config(reload: bool = False) -> TickScalperConfig:
 
     t = raw["tick_scalper"]
     hours = t["session_hours_utc"]
+    ladder = t.get("profit_ladder_points") or [t.get("instant_profit_points", 5.0)]
     _CFG = TickScalperConfig(
         mode=mode,
         symbol=str(t["symbol"]),
@@ -89,10 +99,13 @@ def load_tick_config(reload: bool = False) -> TickScalperConfig:
         max_lots=float(t.get("max_lots", 1.0)),
         risk_percent=float(t["risk_percent"]),
         rapid_cycle=bool(t.get("rapid_cycle", True)),
-        instant_profit_points=float(t.get("instant_profit_points", 3.0)),
+        instant_profit_points=float(t.get("instant_profit_points", 5.0)),
+        profit_ladder_points=tuple(float(x) for x in ladder),
         stop_loss_points=float(t["stop_loss_points"]),
         take_profit_points=float(t["take_profit_points"]),
         max_open_positions=int(t["max_open_positions"]),
+        pyramid_winners_only=bool(t.get("pyramid_winners_only", True)),
+        min_points_between_entries=float(t.get("min_points_between_entries", 10.0)),
         daily_loss_limit_percent=float(t["daily_loss_limit_percent"]),
         cooldown_ms_after_close=int(t["cooldown_ms_after_close"]),
         vwap_enabled=bool(t["vwap_enabled"]),

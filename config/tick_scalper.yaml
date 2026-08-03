@@ -1,40 +1,42 @@
 # ATLAS XAUUSD High-Speed Tick Scalper
-# RAPID CYCLE: open → bank tiny profit ASAP → re-enter (every tick / ~each second)
+# MULTI-ENTRY: several positions open together; each closes independently on profit.
+# Pyramid winners only — never average into losers / no grid / no martingale.
 
 mode: PAPER  # PAPER | LIVE
 
 tick_scalper:
   symbol: XAUUSD
   magic: 26080401
-  poll_sleep_ms: 0              # lowest latency busy-poll
+  poll_sleep_ms: 0
   require_price_change: true
 
-  max_spread_points: 45.0
+  # Tighter spread = fewer instant losers (gold starts underwater by the spread)
+  max_spread_points: 28.0
   max_slippage_points: 40.0
 
-  # 1.0 lot (user request) — keep
+  # 1.0 lot per entry (user request). Margin limits how many can stack.
   use_fixed_lots: true
   fixed_lots: 1.0
   max_lots: 1.0
   risk_percent: 0.25
 
-  # RAPID PROFIT MACHINE
-  # Close the INSTANT unrealized PnL >= instant_profit_points (bid/ask aware).
-  # Hard TP is a backup if it runs further; SL still protects losers.
   rapid_cycle: true
-  instant_profit_points: 3.0    # bank +3 pts (~$3 / 1.0 lot) as soon as green enough
-  take_profit_points: 25.0      # hard TP backup
-  stop_loss_points: 50.0        # must keep SL — cannot only close winners
-  max_open_positions: 1
+  # Staggered profit takes — each open slot uses the next ladder level
+  profit_ladder_points: [5.0, 8.0, 12.0, 18.0, 25.0]
+  instant_profit_points: 5.0    # fallback if ladder empty
+  take_profit_points: 40.0
+  stop_loss_points: 90.0        # wider — spread alone eats ~20-30 pts at open
+  max_open_positions: 5         # MULTIPLE entries at once
+  pyramid_winners_only: true    # only add when ALL open trades are green
+  min_points_between_entries: 10.0
   daily_loss_limit_percent: 1.5
-  cooldown_ms_after_close: 0    # re-scan immediately after close
+  cooldown_ms_after_close: 0
 
-  # Faster entries (still need short-tape edge — not a blind timer)
-  vwap_enabled: false           # off = more frequent cycles
+  vwap_enabled: false
   vwap_near_points: 80.0
-  min_tick_momentum: 2
-  momentum_lookback: 4
-  min_tick_range_points: 2.0
+  min_tick_momentum: 3
+  momentum_lookback: 5
+  min_tick_range_points: 3.0
   session_hours_utc: [0, 24]
 
   log_every_tick: false

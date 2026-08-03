@@ -1,16 +1,14 @@
 """
-Trade execution — MARKET entries/exits only. No pending grids, no averaging.
+Trade execution — MARKET entries/exits only.
 
-LIVE path:
-  - order_check + auto-shrink volume on margin failure
-  - try broker-supported filling modes (IOC / FOK / RETURN)
-  - rich failure comments (retcode, volume, free margin)
+Supports MULTIPLE concurrent positions (same magic).
+No pending grids, no averaging into losers (enforced by engine pyramid rules).
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 import time
+from dataclasses import dataclass
 
 from atlas.tick_scalper.config import TickScalperConfig, load_tick_config
 from atlas.tick_scalper.logger import TickLogger
@@ -45,8 +43,10 @@ class TickExecutor:
         self.feed = feed
         self.log = log
         self.cfg = cfg or load_tick_config()
-        self.paper_position: OpenState | None = None
+        self.paper_positions: list[OpenState] = []
         self._paper_ticket = 900000
+        # Remember ladder targets by ticket (LIVE sync loses custom fields)
+        self._targets: dict[int, float] = {}
 
     def _filling_modes(self) -> list[int]:
         assert mt5 is not None
@@ -54,12 +54,11 @@ class TickExecutor:
         modes: list[int] = []
         if info is not None:
             fm = int(getattr(info, "filling_mode", 0) or 0)
-            # SYMBOL_FILLING_* bit flags
-            if fm & 1:  # FOK
+            if fm & 1:
                 modes.append(mt5.ORDER_FILLING_FOK)
-            if fm & 2:  # IOC
+            if fm & 2:
                 modes.append(mt5.ORDER_FILLING_IOC)
-            if fm & 4:  # RETURN
+            if fm & 4:
                 modes.append(mt5.ORDER_FILLING_RETURN)
         if not modes:
             modes = [
@@ -67,7 +66,6 @@ class TickExecutor:
                 mt5.ORDER_FILLING_FOK,
                 mt5.ORDER_FILLING_RETURN,
             ]
-        # Prefer IOC first for scalping, then others unique
         ordered: list[int] = []
         for m in [mt5.ORDER_FILLING_IOC, mt5.ORDER_FILLING_FOK, mt5.ORDER_FILLING_RETURN] + modes:
             if m not in ordered and m in modes:
@@ -88,16 +86,28 @@ class TickExecutor:
         info = mt5.account_info()
         return float(getattr(info, "margin_free", 0.0) or 0.0) if info else 0.0
 
-    def open_market(self, signal: Signal, volume: float, sl: float, tp: float) -> ExecResult:
+    def open_market(
+        self,
+        signal: Signal,
+        volume: float,
+        sl: float,
+        tp: float,
+        profit_target_points: float | None = None,
+    ) -> ExecResult:
         symbol = self.cfg.symbol
         if volume <= 0:
             return ExecResult(False, 0, 0.0, 0.0, "volume<=0")
+        target = float(
+            profit_target_points
+            if profit_target_points is not None
+            else self.cfg.instant_profit_points
+        )
 
         if self.cfg.is_paper or not self.feed._use_mt5 or not MT5_OK:
             price = signal.ask if signal.side == Side.BUY else signal.bid
             self._paper_ticket += 1
             ticket = self._paper_ticket
-            self.paper_position = OpenState(
+            pos = OpenState(
                 side=signal.side,
                 entry=price,
                 sl=sl,
@@ -105,7 +115,10 @@ class TickExecutor:
                 volume=volume,
                 ticket=ticket,
                 opened_msc=int(time.time() * 1000),
+                profit_target_points=target,
             )
+            self.paper_positions.append(pos)
+            self._targets[ticket] = target
             self.log.trade(
                 event="ENTRY",
                 symbol=symbol,
@@ -115,7 +128,7 @@ class TickExecutor:
                 sl=sl,
                 tp=tp,
                 ticket=ticket,
-                reason=signal.reason,
+                reason=f"{signal.reason} | target=+{target}pts",
                 mode="PAPER",
             )
             return ExecResult(True, ticket, price, volume, "PAPER_FILL")
@@ -125,12 +138,11 @@ class TickExecutor:
         price = signal.ask if signal.side == Side.BUY else signal.bid
         deviation = int(self.cfg.max_slippage_points)
         free = self._account_free_margin()
+        before_tickets = {p.ticket for p in self.current_positions()}
 
-        # Auto-reduce volume until order_check passes or min lot fails
         attempt_vol = float(volume)
         last_comment = "no attempt"
         while attempt_vol > 0:
-            filled = False
             for filling in self._filling_modes():
                 request = {
                     "action": mt5.TRADE_ACTION_DEAL,
@@ -150,16 +162,14 @@ class TickExecutor:
                 if check is not None and check.retcode not in (
                     0,
                     mt5.TRADE_RETCODE_DONE,
-                    10009,  # done / placed variants on some builds
+                    10009,
                 ):
-                    # 10019 = no money
                     last_comment = (
                         f"check retcode={check.retcode} {check.comment} "
                         f"vol={attempt_vol} free_margin={free:.2f}"
                     )
                     if check.retcode == 10019 or "money" in str(check.comment).lower():
-                        break  # shrink volume
-                    # Try next filling mode for unsupported filling etc.
+                        break
                     continue
 
                 result = mt5.order_send(request)
@@ -169,13 +179,13 @@ class TickExecutor:
                 if result.retcode == mt5.TRADE_RETCODE_DONE:
                     fill = float(result.price or price)
                     ticket = int(result.order or result.deal or 0)
-                    # Prefer position ticket if available
-                    positions = mt5.positions_get(symbol=symbol)
-                    if positions:
-                        for p in positions:
-                            if int(p.magic) == self.cfg.magic:
-                                ticket = int(p.ticket)
-                                break
+                    # Prefer newly appeared position ticket
+                    after = self.current_positions()
+                    for p in after:
+                        if p.ticket not in before_tickets:
+                            ticket = p.ticket
+                            break
+                    self._targets[ticket] = target
                     self.log.trade(
                         event="ENTRY",
                         symbol=symbol,
@@ -185,19 +195,19 @@ class TickExecutor:
                         sl=sl,
                         tp=tp,
                         ticket=ticket,
-                        reason=signal.reason,
+                        reason=f"{signal.reason} | target=+{target}pts",
                         mode="LIVE",
                     )
-                    return ExecResult(True, ticket, fill, float(result.volume or attempt_vol), result.comment)
+                    return ExecResult(
+                        True, ticket, fill, float(result.volume or attempt_vol), result.comment
+                    )
 
                 last_comment = (
                     f"retcode={result.retcode} {result.comment} "
                     f"vol={attempt_vol} free_margin={free:.2f}"
                 )
                 if result.retcode == 10019 or "money" in str(result.comment).lower():
-                    break  # shrink
-                # else try next filling
-            # Shrink and retry
+                    break
             nxt = self._shrink_volume(attempt_vol)
             if nxt <= 0 or nxt >= attempt_vol:
                 break
@@ -226,19 +236,14 @@ class TickExecutor:
                 reason=reason,
                 mode="PAPER",
             )
-            self.paper_position = None
+            self.paper_positions = [p for p in self.paper_positions if p.ticket != pos.ticket]
+            self._targets.pop(pos.ticket, None)
             return ExecResult(True, pos.ticket, price, pos.volume, reason)
 
         assert mt5 is not None
         close_type = mt5.ORDER_TYPE_SELL if pos.side == Side.BUY else mt5.ORDER_TYPE_BUY
         price = tick.bid if pos.side == Side.BUY else tick.ask
-        positions = mt5.positions_get(symbol=symbol)
-        pos_id = pos.ticket
-        if positions:
-            for p in positions:
-                if int(p.magic) == self.cfg.magic:
-                    pos_id = int(p.ticket)
-                    break
+        pos_id = int(pos.ticket)
 
         last_comment = "close failed"
         for filling in self._filling_modes():
@@ -274,32 +279,41 @@ class TickExecutor:
                     reason=reason,
                     mode="LIVE",
                 )
+                self._targets.pop(pos_id, None)
                 return ExecResult(True, pos_id, fill, pos.volume, reason)
             last_comment = f"retcode={result.retcode} {result.comment}"
 
         return ExecResult(False, pos.ticket, 0.0, pos.volume, last_comment)
 
-    def current_position(self) -> OpenState | None:
-        if self.cfg.is_paper or not self.feed._use_mt5:
-            return self.paper_position
-        if not MT5_OK or mt5 is None:
-            return self.paper_position
-        positions = mt5.positions_get(symbol=self.cfg.symbol)
-        if not positions:
-            self.paper_position = None
-            return None
-        for p in positions:
+    def current_positions(self) -> list[OpenState]:
+        if self.cfg.is_paper or not self.feed._use_mt5 or not MT5_OK or mt5 is None:
+            return list(self.paper_positions)
+
+        raw = mt5.positions_get(symbol=self.cfg.symbol)
+        if not raw:
+            return []
+        out: list[OpenState] = []
+        for p in raw:
             if int(p.magic) != self.cfg.magic:
                 continue
+            ticket = int(p.ticket)
             side = Side.BUY if p.type == mt5.POSITION_TYPE_BUY else Side.SELL
-            st = OpenState(
-                side=side,
-                entry=float(p.price_open),
-                sl=float(p.sl),
-                tp=float(p.tp),
-                volume=float(p.volume),
-                ticket=int(p.ticket),
+            out.append(
+                OpenState(
+                    side=side,
+                    entry=float(p.price_open),
+                    sl=float(p.sl),
+                    tp=float(p.tp),
+                    volume=float(p.volume),
+                    ticket=ticket,
+                    profit_target_points=self._targets.get(
+                        ticket, self.cfg.instant_profit_points
+                    ),
+                )
             )
-            self.paper_position = st
-            return st
-        return None
+        return out
+
+    def current_position(self) -> OpenState | None:
+        """Back-compat: first open position or None."""
+        pos = self.current_positions()
+        return pos[0] if pos else None
