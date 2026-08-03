@@ -170,6 +170,47 @@ def cmd_backtest(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_tick(args: argparse.Namespace) -> int:
+    """
+    High-speed XAUUSD tick scalper — reads every MT5 tick, not candle closes.
+    Uses ATLAS_MODE from .env (PAPER | LIVE). Start with PAPER on demo.
+    """
+    from atlas.tick_scalper.engine import run_tick_scalper
+
+    try:
+        run_tick_scalper(max_ticks=args.max_ticks)
+    except RuntimeError as exc:
+        print(f"ERROR: {exc}")
+        return 1
+    return 0
+
+
+def cmd_tick_backtest(args: argparse.Namespace) -> int:
+    """Replay synthetic or provided tick count through the same tick strategy."""
+    from atlas.tick_scalper.backtest import TickBacktester, generate_synthetic_ticks
+
+    ticks = generate_synthetic_ticks(n=args.ticks, seed=args.seed)
+    bt = TickBacktester()
+    result = bt.run(ticks)
+    print("=" * 50)
+    print("ATLAS TICK SCALPER BACKTEST (synthetic tape)")
+    print("=" * 50)
+    print(f"ticks     : {result.ticks_processed}")
+    print(f"signals   : {result.signals}")
+    print(f"trades    : {len(result.trades)}")
+    print(f"win_rate  : {result.win_rate}%  (sample only — not a live claim)")
+    print(f"pnl_pts   : {result.total_pnl_points:.1f}")
+    if result.trades and not args.quiet:
+        print("\nLast trades:")
+        for t in result.trades[-10:]:
+            print(
+                f"  {t.side:4} entry={t.entry:.3f} exit={t.exit:.3f} "
+                f"pnl={t.pnl_points:+.1f}pts ({t.reason})"
+            )
+    print("\nNote: synthetic backtest ≠ live expectancy. Validate on PAPER first.")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         description="ATLAS — explainable, risk-managed MT5 trading (watch / paper / live)"
@@ -207,6 +248,27 @@ def build_parser() -> argparse.ArgumentParser:
     b.add_argument("--max-symbols", type=int, default=3)
     b.add_argument("--quiet", action="store_true")
     b.set_defaults(func=cmd_backtest)
+
+    t = sub.add_parser(
+        "tick",
+        help="XAUUSD high-speed tick scalper (every MT5 tick; PAPER/LIVE via ATLAS_MODE)",
+    )
+    t.add_argument(
+        "--max-ticks",
+        type=int,
+        default=None,
+        help="Stop after N processed ticks (tests / smoke)",
+    )
+    t.set_defaults(func=cmd_tick)
+
+    tb = sub.add_parser(
+        "tick-backtest",
+        help="Replay synthetic ticks through the tick scalper strategy",
+    )
+    tb.add_argument("--ticks", type=int, default=8000, help="Number of synthetic ticks")
+    tb.add_argument("--seed", type=int, default=42)
+    tb.add_argument("--quiet", action="store_true")
+    tb.set_defaults(func=cmd_tick_backtest)
 
     return p
 

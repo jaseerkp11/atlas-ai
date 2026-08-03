@@ -1,0 +1,37 @@
+# ATLAS XAUUSD High-Speed Tick Scalper
+# Optimized for every incoming MT5 tick (not candle closes).
+
+mode: PAPER  # PAPER | LIVE — use PAPER first on demo
+
+tick_scalper:
+  symbol: XAUUSD
+  magic: 26080401
+  # Poll MT5 for new ticks (ms). 0 = busy-wait (lowest latency, higher CPU).
+  poll_sleep_ms: 1
+  # Only evaluate strategy when bid/ask actually changes
+  require_price_change: true
+
+  # Spread / slippage filters (gold points; 1 point = 0.01 on typical XAU quotes)
+  max_spread_points: 40.0
+  max_slippage_points: 30.0
+
+  # Risk
+  risk_percent: 0.25          # % of balance risked per trade
+  stop_loss_points: 80.0      # hard SL distance from entry
+  take_profit_points: 120.0   # hard TP distance (≈ 1:1.5)
+  max_open_positions: 1       # never average / never grid
+  daily_loss_limit_percent: 1.5
+  cooldown_ms_after_close: 500
+
+  # Strategy edge filters (all must pass — never force trades)
+  vwap_enabled: true
+  vwap_near_points: 50.0      # prefer entries near session VWAP
+  min_tick_momentum: 3        # last N ticks must agree with direction
+  momentum_lookback: 8
+  min_tick_range_points: 5.0  # ignore dead/flat tape
+  session_hours_utc: [7, 22]  # trade window
+
+  # Logging
+  log_every_tick: false       # true = huge files; false = log tick summaries + events
+  tick_summary_every_n: 500
+  log_dir: logs/tick_scalper
