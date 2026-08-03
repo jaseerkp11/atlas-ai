@@ -291,6 +291,7 @@ class MT5Client:
     def current_price(self, symbol: str) -> tuple[float, float]:
         """Return (bid, ask)."""
         if self._use_real_mt5 and mt5 is not None:
+            mt5.symbol_select(symbol, True)
             tick = mt5.symbol_info_tick(symbol)
             if tick:
                 return float(tick.bid), float(tick.ask)
@@ -302,6 +303,23 @@ class MT5Client:
         # Fallback synthetic mid
         mid = 1.1000 if not symbol.startswith("XAU") else 2400.0
         return mid, mid + 0.0001
+
+    def live_tick_snapshot(self, symbol: str) -> dict[str, Any] | None:
+        """Return live tick fields for price verification against the MT5 chart."""
+        if not (self._use_real_mt5 and mt5 is not None):
+            return None
+        mt5.symbol_select(symbol, True)
+        tick = mt5.symbol_info_tick(symbol)
+        if tick is None:
+            return None
+        return {
+            "symbol": symbol,
+            "bid": float(tick.bid),
+            "ask": float(tick.ask),
+            "last": float(getattr(tick, "last", 0.0) or 0.0),
+            "time": datetime.fromtimestamp(int(tick.time), tz=timezone.utc).isoformat(),
+            "volume": int(getattr(tick, "volume", 0) or 0),
+        }
 
     # ── Historical rates ──────────────────────────────────────────────────────
 

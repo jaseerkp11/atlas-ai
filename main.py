@@ -46,20 +46,35 @@ def cmd_connect(_: argparse.Namespace) -> int:
     print(f"Connected   : {ok}")
     print(f"Data source : {info.get('data_source', '?')}")
     print(f"Order mode  : {info.get('order_mode', settings.mode)}")
+    print(f"Min score   : {settings.gates.min_score}/100")
+    print(f"Min R:R     : 1:{settings.gates.min_reward_risk:g}")
     for k in ("login", "name", "server", "balance", "equity", "leverage"):
         if k in info:
             print(f"{k.capitalize():12}: {info[k]}")
     print(f"Symbols     : {len(settings.symbols)} configured")
 
     if client.using_live_market_data:
-        for sym in ("XAUUSD", "EURUSD"):
-            if sym in settings.symbols:
-                bid, ask = client.current_price(sym)
-                print(f"Live {sym:7}: bid={bid:.5f} ask={ask:.5f}")
         print()
-        print("OK — using LIVE market data from MT5.")
-        if settings.is_paper:
-            print("Orders stay PAPER (simulated) until you set ATLAS_MODE=LIVE.")
+        print("Live tick check (compare these to your MT5 Market Watch):")
+        for sym in ("XAUUSD", "EURUSD", "GBPUSD"):
+            if sym not in settings.symbols:
+                continue
+            snap = client.live_tick_snapshot(sym)
+            if not snap:
+                bid, ask = client.current_price(sym)
+                print(f"  {sym:7} bid={bid:.5f} ask={ask:.5f}")
+            else:
+                print(
+                    f"  {snap['symbol']:7} bid={snap['bid']:.5f} ask={snap['ask']:.5f} "
+                    f"time_utc={snap['time']}"
+                )
+        print()
+        print("OK — prices come from the live MT5 terminal tick feed.")
+        if settings.is_live:
+            print("LIVE MODE — real orders will be sent when all gates pass.")
+            print("You are on whatever account MT5 is logged into (demo or real).")
+        else:
+            print("PAPER mode — live prices, simulated orders only.")
     else:
         print()
         print("WARNING — SYNTHETIC data. Prices will NOT match the real market.")
@@ -81,9 +96,21 @@ def cmd_scan(args: argparse.Namespace) -> int:
     client.connect()
     symbols = args.symbols or settings.symbols
     src = "MT5_LIVE_MARKET" if client.using_live_market_data else "SYNTHETIC_NOT_LIVE"
-    print(f"Mode={settings.mode} | data={src} | min_score={settings.gates.min_score} | min_rr={settings.gates.min_reward_risk}")
-    if not client.using_live_market_data:
-        print("WARNING: synthetic prices — connect MT5 for real market levels.\n")
+    print(
+        f"Mode={settings.mode} | data={src} | "
+        f"min_score={settings.gates.min_score} | min_rr=1:{settings.gates.min_reward_risk:g}"
+    )
+    if client.using_live_market_data:
+        print("Live prices (verify vs MT5 Market Watch):")
+        for sym in symbols[:5]:
+            snap = client.live_tick_snapshot(sym)
+            if snap:
+                print(
+                    f"  {snap['symbol']:7} bid={snap['bid']:.5f} ask={snap['ask']:.5f} "
+                    f"utc={snap['time']}"
+                )
+    else:
+        print("WARNING: synthetic prices — connect MT5 for real market levels.")
     print()
     for symbol in symbols:
         frames = {
