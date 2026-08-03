@@ -72,6 +72,8 @@ analysis:
   order_block_lookback: 40
   liquidity_lookback: 30
   equal_level_tolerance_atr: 0.15
+  watch_interval_seconds: 60   # poll MT5; full signal cards emit on each NEW M15 close (~15m)
+
 
 # ── Backtest ──────────────────────────────────────────────────────────────────
 backtest:

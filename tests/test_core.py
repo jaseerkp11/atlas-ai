@@ -252,3 +252,21 @@ def test_backtest_runs_and_reports_limitations():
     assert stats.limitations == BACKTEST_LIMITATIONS
     assert stats.total_trades >= 0
     assert stats.starting_balance > 0
+
+
+def test_sr_map_builds_from_frames():
+    from atlas.analysis.levels import build_sr_map
+    from atlas.backtest.runner import _resample_from_m5
+
+    m5 = generate_synthetic_ohlc("EURUSD", "M5", 600, seed=3)
+    frames = {
+        "M5": m5,
+        "M15": _resample_from_m5(m5, "15min"),
+        "H1": _resample_from_m5(m5, "1h"),
+        "H4": _resample_from_m5(m5, "4h"),
+    }
+    mid = float(m5["close"].iloc[-1])
+    sr = build_sr_map("EURUSD", frames, mid=mid)
+    assert sr.mid == mid
+    lines = sr.chart_lines()
+    assert any("SUP" in x or "RES" in x or "S/R" in x for x in lines)

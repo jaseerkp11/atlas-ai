@@ -85,10 +85,12 @@ def cmd_connect(_: argparse.Namespace) -> int:
 
 
 def cmd_scan(args: argparse.Namespace) -> int:
-    """One-shot scan: score every symbol and print reasoning (no execution)."""
+    """One-shot scan: score every symbol and print reasoning + S/R for chart watch."""
+    from atlas.analysis.levels import build_sr_map
     from atlas.analysis.setups import detect_setup
     from atlas.config import load_settings
     from atlas.execution.mt5_client import MT5Client
+    from atlas.live.watch import format_watch_card
     from atlas.scoring.engine import evaluate_setup
 
     settings = load_settings()
@@ -119,11 +121,18 @@ def cmd_scan(args: argparse.Namespace) -> int:
             "H1": client.copy_rates(symbol, "H1", 200),
             "H4": client.copy_rates(symbol, "H4", 150),
         }
+        bid, ask = client.current_price(symbol)
+        mid = (bid + ask) / 2.0
+        sr = build_sr_map(symbol, frames, mid=mid)
         features = detect_setup(symbol, frames)
         if features is None:
             print(f"{symbol}: NO TRADE — insufficient data\n")
+            for line in sr.chart_lines():
+                print(line)
+            print()
             continue
         decision = evaluate_setup(features)
+        print(format_watch_card(decision, sr, bid, ask, execute_armed=False))
         print(decision.reasoning_text())
     client.disconnect()
     return 0
@@ -137,6 +146,15 @@ def cmd_run(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_watch(args: argparse.Namespace) -> int:
+    """15-minute M15 watch: S/R + signals for chart review; optional --execute."""
+    from atlas.live.watch import WatchLoop
+
+    loop = WatchLoop(execute=args.execute)
+    loop.start(max_cycles=args.cycles)
+    return 0
+
+
 def cmd_backtest(args: argparse.Namespace) -> int:
     from atlas.backtest.runner import BacktestRunner
     from atlas.config import load_settings
@@ -145,7 +163,6 @@ def cmd_backtest(args: argparse.Namespace) -> int:
     symbols = args.symbols or settings.symbols[: args.max_symbols]
     runner = BacktestRunner(on_log=lambda m: logging.getLogger("backtest").info(m) if args.quiet else print(m))
     stats = runner.run(symbols=symbols, bars=args.bars)
-    # Non-zero only on hard failure; low win rate is not a failure
     print(
         f"\nDone. trades={stats.total_trades} win_rate={stats.win_rate}% "
         f"avg_R={stats.average_r} max_DD={stats.max_drawdown_pct}%"
@@ -155,24 +172,36 @@ def cmd_backtest(args: argparse.Namespace) -> int:
 
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
-        description="ATLAS — explainable, risk-managed MT5 trading system (PAPER default)"
+        description="ATLAS — explainable, risk-managed MT5 trading (watch / paper / live)"
     )
     p.add_argument("-v", "--verbose", action="store_true")
     sub = p.add_subparsers(dest="command", required=True)
 
-    c = sub.add_parser("connect", help="Test broker / paper connection")
+    c = sub.add_parser("connect", help="Test MT5 connection + live tick check")
     c.set_defaults(func=cmd_connect)
 
-    s = sub.add_parser("scan", help="Score all symbols once and print reasoning")
+    s = sub.add_parser("scan", help="One-shot score + S/R levels for chart watch")
     s.add_argument("--symbols", nargs="+", default=None)
     s.set_defaults(func=cmd_scan)
 
-    r = sub.add_parser("run", help="Start real-time loop (PAPER unless ATLAS_MODE=LIVE)")
+    w = sub.add_parser(
+        "watch",
+        help="Scan every new M15 close (~15m): S/R + signals to watch on chart",
+    )
+    w.add_argument(
+        "--execute",
+        action="store_true",
+        help="Also send orders when gates pass (uses ATLAS_MODE PAPER/LIVE)",
+    )
+    w.add_argument("--cycles", type=int, default=None, help="Stop after N poll cycles")
+    w.set_defaults(func=cmd_watch)
+
+    r = sub.add_parser("run", help="M5 close loop (auto path)")
     r.add_argument("--poll", type=float, default=15.0, help="Seconds between polls")
     r.add_argument("--iterations", type=int, default=None, help="Stop after N ticks (tests)")
     r.set_defaults(func=cmd_run)
 
-    b = sub.add_parser("backtest", help="Run backtest with the same scoring code as live")
+    b = sub.add_parser("backtest", help="Backtest with the same scoring code as live")
     b.add_argument("--symbols", nargs="+", default=None)
     b.add_argument("--bars", type=int, default=None)
     b.add_argument("--max-symbols", type=int, default=3)
