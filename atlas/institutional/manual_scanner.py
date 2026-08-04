@@ -106,8 +106,9 @@ def _grade(
     strong = area.score >= 82
 
     if with_trend and above_market and near:
-        # e.g. buy liquidity ABOVE current price while long-biased → reclaim plan, not dip plan
-        return ("A" if strong else "B"), "WAIT_FOR_RECLAIM"
+        # Zone not yet reached — reclaim/reach plan (BUY above mid, or SELL below mid)
+        status = "WAIT_FOR_RECLAIM" if area.side == "BUY" else "WAIT_FOR_ZONE"
+        return ("A" if strong else "B"), status
 
     elite = (
         with_trend
@@ -123,10 +124,17 @@ def _grade(
         return "A+", "WAIT_FOR_TRIGGER"
     if with_trend and in_path and near and area.score >= 75:
         return "A", "WAIT_FOR_TRIGGER" if premium_kind or area.score >= 85 else "READY_TO_WATCH"
+    # Distant already-passed zones: watch only — do not inflate to A trigger
     if with_trend and already_passed and area.score >= 80:
-        return "A", "WAIT_FOR_TRIGGER"
+        if near:
+            return "A", "WAIT_FOR_TRIGGER"
+        return "B", "READY_TO_WATCH"
     if with_trend and area.score >= 70:
-        return "A" if in_path else "B", "READY_TO_WATCH" if in_path else "WAIT_FOR_RECLAIM"
+        if in_path and near:
+            return "A", "READY_TO_WATCH"
+        if above_market:
+            return "B", ("WAIT_FOR_RECLAIM" if area.side == "BUY" else "WAIT_FOR_ZONE")
+        return "B", "READY_TO_WATCH"
     return "B", "READY_TO_WATCH"
 
 
@@ -341,6 +349,7 @@ def build_manual_scan(
         "WAIT_FOR_TRIGGER": 0,
         "READY_TO_WATCH": 1,
         "WAIT_FOR_RECLAIM": 2,
+        "WAIT_FOR_ZONE": 2,
         "AVOID_NOW": 3,
     }
 

@@ -72,21 +72,39 @@ class InstitutionalAnalyzer:
         h1 = frames.get("H1")
         m5 = frames.get("M5")
         m1 = frames.get("M1")
+        # Structure/liquidity/FVG on M15 when available; mid prefers last CLOSED M5
+        # so M5-close scanner levels match the chart the trader is watching.
         setup_df = m15 if m15 is not None and len(m15) else m5
+        price_df = m5 if m5 is not None and len(m5) >= 3 else setup_df
 
         mid = 0.0
-        if setup_df is not None and len(setup_df):
-            mid = float(setup_df["close"].iloc[-2] if len(setup_df) > 2 else setup_df["close"].iloc[-1])
+        if price_df is not None and len(price_df):
+            mid = float(
+                price_df["close"].iloc[-2] if len(price_df) >= 2 else price_df["close"].iloc[-1]
+            )
         atr = latest_atr(setup_df, 14) if setup_df is not None else 1.0
+        # Prefer M5 ATR for distance scoring when present (same TF as mid)
+        if m5 is not None and len(m5) >= 30:
+            atr_m5 = latest_atr(m5, 14)
+            if atr_m5:
+                atr = atr_m5
 
         lookback = int(self.cfg.analysis.get("swing_lookback", 3))
 
-        # --- Module analyses ---
-        m15_s = analyze_structure(setup_df, lookback=lookback)
+        # True M15 structure when M15 exists (do not mislabel M5 as M15)
+        m15_s = (
+            analyze_structure(m15, lookback=lookback)
+            if m15 is not None and len(m15) >= 40
+            else analyze_structure(setup_df, lookback=lookback)
+        )
         h4_s = analyze_structure(h4, lookback=lookback) if h4 is not None else m15_s
         h1_s = analyze_structure(h1, lookback=lookback) if h1 is not None else m15_s
 
-        liq = analyze_liquidity(setup_df, lookback=lookback)
+        liq = analyze_liquidity(
+            setup_df,
+            lookback=lookback,
+            equal_tol_atr=float(self.cfg.analysis.get("equal_level_tolerance_atr", 0.15)),
+        )
         sr = analyze_support_resistance(symbol, frames, mid, atr or 1.0)
         fvg = analyze_fvg(setup_df, mid)
         ob = analyze_order_blocks(setup_df, mid)

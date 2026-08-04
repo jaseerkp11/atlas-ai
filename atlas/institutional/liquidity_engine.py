@@ -50,7 +50,11 @@ def _session_extremes(df: pd.DataFrame) -> list[LiquidityPool]:
     return pools
 
 
-def analyze_liquidity(df: pd.DataFrame, lookback: int = 3) -> LiquidityReport:
+def analyze_liquidity(
+    df: pd.DataFrame,
+    lookback: int = 3,
+    equal_tol_atr: float = 0.15,
+) -> LiquidityReport:
     if df is None or len(df) < 40:
         mod = ModuleScore("liquidity", 0, 10, Bias.NEUTRAL, "no data", False)
         return LiquidityReport([], False, False, 0, Bias.NEUTRAL, "no data", mod)
@@ -58,8 +62,9 @@ def analyze_liquidity(df: pd.DataFrame, lookback: int = 3) -> LiquidityReport:
     atr = latest_atr(df, 14) or 1.0
     sh = find_swing_highs(df, lookback=lookback)
     sl = find_swing_lows(df, lookback=lookback)
-    eq_h = find_equal_levels(sh, tolerance=atr * 0.15)
-    eq_l = find_equal_levels(sl, tolerance=atr * 0.15)
+    tol = atr * float(equal_tol_atr)
+    eq_h = find_equal_levels(sh, tolerance=tol)
+    eq_l = find_equal_levels(sl, tolerance=tol)
 
     pools: list[LiquidityPool] = []
     for a, b in eq_h:

@@ -25,7 +25,7 @@ from dataclasses import dataclass, field
 import pandas as pd
 
 from atlas.analysis.volatility import latest_atr
-from atlas.institutional.models import Bias, MarketNarrative, ModuleScore
+from atlas.institutional.models import Bias, MarketNarrative, ModuleScore, Zone
 
 
 @dataclass
@@ -154,27 +154,35 @@ def evaluate_playbooks(
     else:
         unlock.append("Need price into 61.8–78.6 OTE with structure alignment")
 
-    # --- 3) OB + FVG overlap ---
+    # --- 3) OB + FVG overlap (must be near each other — not anywhere on chart) ---
     bull_fvg = [z for z in narrative.zones if z.kind == "bullish_fvg" and z.fresh]
     bear_fvg = [z for z in narrative.zones if z.kind == "bearish_fvg" and z.fresh]
     bull_ob = [z for z in narrative.zones if z.kind == "bullish_ob" and z.fresh]
     bear_ob = [z for z in narrative.zones if z.kind == "bearish_ob" and z.fresh]
-    if bull_fvg and bull_ob:
+
+    def _centers_near(a: Zone, b: Zone, max_atr: float = 1.25) -> bool:
+        ca = (a.top + a.bottom) / 2.0
+        cb = (b.top + b.bottom) / 2.0
+        # Overlap OR centers within max_atr
+        overlap = min(a.top, b.top) >= max(a.bottom, b.bottom)
+        return overlap or abs(ca - cb) / atr <= max_atr
+
+    if any(_centers_near(f, o) for f in bull_fvg for o in bull_ob):
         hits.append(
             PlaybookHit(
                 "Bullish OB+FVG Confluence",
                 Bias.BULLISH,
                 16.0,
-                ["Fresh bullish order block overlapping FVG"],
+                ["Fresh bullish order block overlapping / near FVG"],
             )
         )
-    if bear_fvg and bear_ob:
+    if any(_centers_near(f, o) for f in bear_fvg for o in bear_ob):
         hits.append(
             PlaybookHit(
                 "Bearish OB+FVG Confluence",
                 Bias.BEARISH,
                 16.0,
-                ["Fresh bearish order block overlapping FVG"],
+                ["Fresh bearish order block overlapping / near FVG"],
             )
         )
     if not (bull_fvg or bear_fvg or bull_ob or bear_ob):

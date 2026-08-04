@@ -64,7 +64,8 @@ def detect_bos(
     if len(df) < 3:
         return False, None
 
-    close = float(df["close"].iloc[-1])
+    # Use last CLOSED bar so forming candle does not flip BOS mid-bar
+    close = float(df["close"].iloc[-2] if len(df) >= 2 else df["close"].iloc[-1])
     # Use swings that are not on the last candle (need confirmation space)
     last_idx = len(df) - 1
     sh = [s for s in swing_highs if s.index < last_idx - 1]
@@ -113,7 +114,7 @@ def detect_choch(
     if prior_trend == Direction.NEUTRAL or len(df) < 3:
         return False, None
 
-    close = float(df["close"].iloc[-1])
+    close = float(df["close"].iloc[-2] if len(df) >= 2 else df["close"].iloc[-1])
     last_idx = len(df) - 1
     sh = [s for s in swing_highs if s.index < last_idx - 1]
     sl = [s for s in swing_lows if s.index < last_idx - 1]
