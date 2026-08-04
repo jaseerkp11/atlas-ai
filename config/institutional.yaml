@@ -10,13 +10,15 @@ institutional:
   # Multi-timeframe stack (M1 = entry timing only)
   timeframes: [H4, H1, M15, M5, M1]
 
-  # Decision gates — raise for fewer, higher-quality trades
-  min_probability: 72.0
-  min_confidence: 65.0
-  min_confluence: 70.0
+  # Decision gates — quality over quantity
+  min_probability: 70.0
+  min_confidence: 62.0
+  min_confluence: 65.0
   min_reward_risk: 2.5
-  require_htf_alignment: true   # H4+H1 must agree
-  require_m1_timing: true       # M1 must confirm for EXECUTE
+  # H1 is primary HTF for XAUUSD; H4 soft (transitional OK if H1 aligns)
+  require_htf_alignment: true
+  require_m1_timing: true
+  require_playbook: true
 
   # Confluence weights (sum ≈ 100)
   weights:

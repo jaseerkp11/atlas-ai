@@ -53,5 +53,11 @@ def render_dashboard(decision: InstitutionalDecision) -> str:
                 )
     lines.append("-" * 72)
     lines.append(decision.summary())
+    if n and n.extras.get("playbook"):
+        lines.append(f"Playbook: {n.extras.get('playbook')}")
+    if n and n.extras.get("unlock"):
+        lines.append("Unlock path:")
+        for h in n.extras["unlock"][:5]:
+            lines.append(f"  → {h}")
     lines.append("=" * 72)
     return "\n".join(lines)

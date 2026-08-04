@@ -233,65 +233,18 @@ def cmd_analyze(args: argparse.Namespace) -> int:
 
 def cmd_institutional(args: argparse.Namespace) -> int:
     """
-    Continuous institutional monitor — re-analyzes on interval.
-    Optional --execute only when decision is BUY/SELL and risk allows.
+    Institutional monitor on each NEW M5 close (high-probability playbooks).
     """
-    import time
-
-    from atlas.institutional.analyzer import InstitutionalAnalyzer
     from atlas.institutional.config import load_institutional_config
-    from atlas.institutional.dashboard import render_dashboard
-    from atlas.institutional.models import DecisionAction
-    from atlas.institutional.risk_manager import InstitutionalRiskManager
+    from atlas.institutional.watch_m5 import InstitutionalWatch
 
     cfg = load_institutional_config(reload=True)
-    analyzer = InstitutionalAnalyzer(cfg)
-    risk = InstitutionalRiskManager(cfg)
-    if not analyzer.connect():
-        print("ERROR: MT5 connection failed")
-        return 1
-
-    print("Institutional monitor started. Ctrl+C to stop.")
-    print(f"Gates: prob≥{cfg.min_probability} conf≥{cfg.min_confidence} conf≥{cfg.min_confluence}")
-    cycles = 0
+    watch = InstitutionalWatch(cfg, execute=args.execute)
     try:
-        while True:
-            decision = analyzer.analyze(cfg.symbol)
-            print(render_dashboard(decision))
-            if args.execute and decision.is_executable():
-                eq = 10000.0
-                try:
-                    info = analyzer.client.account_info_dict()
-                    eq = float(info.get("equity") or info.get("balance") or eq)
-                except Exception:
-                    pass
-                ok, why = risk.allows_trade(eq, open_positions=0)
-                if not ok:
-                    print(f"RISK_BLOCK {why}")
-                else:
-                    print(
-                        f"EXECUTE ARMED {decision.action.value} @ {decision.entry:.3f} "
-                        f"(mode={cfg.mode}) — wire to execution engine / confirm manually first"
-                    )
-                    # Prefer existing scalp execution path only when LIVE and user insisted.
-                    if cfg.is_live:
-                        from atlas.execution.engine import ExecutionEngine
-                        from atlas.models import Direction, SetupFeatures
-
-                        # Soft bridge: log intent; full order send uses ExecutionEngine if available
-                        print(
-                            "LIVE note: institutional execute bridge logs intent. "
-                            "Confirm levels on chart before size-up."
-                        )
-                    risk.register_trade()
-            cycles += 1
-            if args.cycles and cycles >= args.cycles:
-                break
-            time.sleep(max(5.0, args.poll))
-    except KeyboardInterrupt:
-        print("\nStopped by user")
-    finally:
-        analyzer.disconnect()
+        watch.start(max_cycles=args.cycles)
+    except RuntimeError as exc:
+        print(f"ERROR: {exc}")
+        return 1
     return 0
 
 
@@ -398,15 +351,21 @@ def build_parser() -> argparse.ArgumentParser:
 
     inst = sub.add_parser(
         "institutional",
-        help="Continuous institutional monitor (H4→M1). Optional --execute when gates pass",
+        help="Institutional SMC analysis on each NEW M5 close (high-probability playbooks)",
     )
-    inst.add_argument("--poll", type=float, default=60.0, help="Seconds between analyses")
-    inst.add_argument("--cycles", type=int, default=None)
+    inst.add_argument(
+        "--cycles",
+        type=int,
+        default=None,
+        help="Stop after N closed-M5 analyses",
+    )
     inst.add_argument(
         "--execute",
         action="store_true",
         help="Arm execution when BUY/SELL clears all institutional gates",
     )
+    # keep --poll for backward compat (ignored; M5-close driven)
+    inst.add_argument("--poll", type=float, default=60.0, help=argparse.SUPPRESS)
     inst.set_defaults(func=cmd_institutional)
 
     ib = sub.add_parser(

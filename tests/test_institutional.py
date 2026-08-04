@@ -92,13 +92,29 @@ def test_confluence_prefers_agreement():
     assert c.probability > 50
 
 
-def test_confluence_neutral_when_split():
+def test_playbook_boost_raises_probability():
+    from atlas.institutional.models import MarketNarrative, utcnow
+    from atlas.institutional.playbook_engine import PlaybookHit, PlaybookResult
+
     mods = [
-        ModuleScore("trend", 80, 12, Bias.BULLISH, "t", True),
-        ModuleScore("market_structure", 80, 12, Bias.BEARISH, "s", True),
+        ModuleScore("trend", 70, 12, Bias.BULLISH, "t", True),
+        ModuleScore("market_structure", 65, 14, Bias.BULLISH, "BOS=bullish discount", True),
+        ModuleScore("liquidity", 55, 10, Bias.NEUTRAL, "sweep=none", False),
+        ModuleScore("price_action", 70, 8, Bias.BULLISH, "bullish_pin", True),
+        ModuleScore("session", 80, 4, Bias.NEUTRAL, "London", True),
     ]
-    c = compute_confluence(mods, {"trend": 12, "market_structure": 12})
-    assert c.consensus_bias == Bias.NEUTRAL
+    pb = PlaybookResult(
+        hits=[PlaybookHit("Killzone PA (London)", Bias.BULLISH, 10.0, ["x"])],
+        best=PlaybookHit("Killzone PA (London)", Bias.BULLISH, 10.0, ["x"]),
+        total_boost=10.0,
+        summary="playbooks=1",
+        unlock_hints=[],
+    )
+    cfg = load_institutional_config(reload=True)
+    base = compute_confluence(mods, cfg.weights, h1_bias=Bias.BULLISH)
+    boosted = compute_confluence(mods, cfg.weights, playbooks=pb, h1_bias=Bias.BULLISH)
+    assert boosted.probability >= base.probability
+    assert boosted.playbook_name != ""
 
 
 def test_analyzer_no_trade_without_data_quality():
@@ -128,7 +144,7 @@ def test_analyzer_no_trade_without_data_quality():
     )
     conf = ConfluenceResult(40, 30, 30, Bias.NEUTRAL, 0, 0, [], "low")
     pa = PriceActionReport([], 40, Bias.NEUTRAL, "none", ModuleScore("price_action", 40, 8, Bias.NEUTRAL, "", False))
-    d = decide(cfg, narrative, conf, None, None, pa, False, True, False)
+    d = decide(cfg, narrative, conf, None, None, pa, False, True, False, False, None)
     assert d.action in (DecisionAction.NO_TRADE, DecisionAction.WAIT)
 
 

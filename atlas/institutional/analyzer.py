@@ -82,16 +82,14 @@ class InstitutionalAnalyzer:
         lookback = int(self.cfg.analysis.get("swing_lookback", 3))
 
         # --- Module analyses ---
-        struct = analyze_structure(setup_df, lookback=lookback)
-        # HTF structure for bias
-        h4_s = analyze_structure(h4, lookback=lookback) if h4 is not None else struct
-        h1_s = analyze_structure(h1, lookback=lookback) if h1 is not None else struct
+        m15_s = analyze_structure(setup_df, lookback=lookback)
+        h4_s = analyze_structure(h4, lookback=lookback) if h4 is not None else m15_s
+        h1_s = analyze_structure(h1, lookback=lookback) if h1 is not None else m15_s
 
         liq = analyze_liquidity(setup_df, lookback=lookback)
         sr = analyze_support_resistance(symbol, frames, mid, atr or 1.0)
         fvg = analyze_fvg(setup_df, mid)
         ob = analyze_order_blocks(setup_df, mid)
-        # Prefer H1 structure bias for fib anchors
         fib = analyze_fibonacci(
             frames,
             mid,
@@ -107,7 +105,7 @@ class InstitutionalAnalyzer:
 
         modules = [
             trend.module,
-            h1_s.module,
+            m15_s.module,  # actionable structure on setup TF
             liq.module,
             sr.module,
             ob.module,
@@ -120,24 +118,66 @@ class InstitutionalAnalyzer:
             news.module,
             session.module,
         ]
-        confluence = compute_confluence(modules, self.cfg.weights)
 
         htf_aligned = (
             h4_s.bias == h1_s.bias
             and h4_s.bias != Bias.NEUTRAL
             and h1_s.bias != Bias.NEUTRAL
         )
+
+        # Draft narrative for playbooks (zones/fib/mid ready)
+        draft = MarketNarrative(
+            symbol=symbol,
+            as_of=utcnow(),
+            overall_bias=h1_s.bias,
+            htf_bias=h4_s.bias if h4_s.bias == h1_s.bias else Bias.NEUTRAL,
+            mtf_bias=m15_s.bias,
+            structure_summary=f"H1[{h1_s.summary}] M15[{m15_s.summary}]",
+            liquidity_summary=liq.summary,
+            institutional_confluence="",
+            sr_summary=sr.summary,
+            trend_quality=trend.regime,
+            volatility_regime=trend.volatility_module.detail,
+            best_session=session.best_session,
+            news_status=news.status,
+            module_scores=[],
+            zones=sr.zones + fvg.zones + ob.zones,
+            fib_levels=fib.levels,
+            mid=mid,
+            atr_m15=atr or 0.0,
+            extras={
+                "h4": h4_s.summary,
+                "h1": h1_s.summary,
+                "m15": m15_s.summary,
+                "fib_anchor": fib.anchor_tf,
+                "session_rank": session.ranking,
+            },
+        )
+
+        from atlas.institutional.playbook_engine import evaluate_playbooks
+
+        playbooks = evaluate_playbooks(
+            draft,
+            modules,
+            consensus=h1_s.bias,
+            session_name=session.best_session,
+            h1_bias=h1_s.bias,
+        )
+        confluence = compute_confluence(
+            modules, self.cfg.weights, playbooks=playbooks, h1_bias=h1_s.bias
+        )
+
         overall = confluence.consensus_bias
-        if htf_aligned:
+        if h1_s.bias != Bias.NEUTRAL and overall == Bias.NEUTRAL:
             overall = h1_s.bias
 
         narrative = MarketNarrative(
             symbol=symbol,
-            as_of=utcnow(),
+            as_of=draft.as_of,
             overall_bias=overall,
-            htf_bias=h4_s.bias if h4_s.bias == h1_s.bias else Bias.NEUTRAL,
-            mtf_bias=struct.bias,
-            structure_summary=h1_s.summary,
+            htf_bias=draft.htf_bias,
+            mtf_bias=m15_s.bias,
+            structure_summary=draft.structure_summary,
             liquidity_summary=liq.summary,
             institutional_confluence=confluence.summary,
             sr_summary=sr.summary,
@@ -146,17 +186,27 @@ class InstitutionalAnalyzer:
             best_session=session.best_session,
             news_status=news.status,
             module_scores=confluence.modules,
-            zones=sr.zones + fvg.zones + ob.zones,
+            zones=draft.zones,
             fib_levels=fib.levels,
             mid=mid,
             atr_m15=atr or 0.0,
             extras={
-                "h4": h4_s.summary,
-                "h1": h1_s.summary,
-                "fib_anchor": fib.anchor_tf,
-                "session_rank": session.ranking,
+                **draft.extras,
+                "playbook": playbooks.summary,
+                "unlock": playbooks.unlock_hints,
             },
         )
+
+        h1_aligned = (
+            h1_s.bias != Bias.NEUTRAL and h1_s.bias == confluence.consensus_bias
+        ) or (
+            confluence.playbook_name != ""
+            and h1_s.bias == Bias.NEUTRAL
+            and confluence.consensus_bias != Bias.NEUTRAL
+        )
+        # Stricter: H1 must match consensus when H1 has a bias
+        if h1_s.bias != Bias.NEUTRAL:
+            h1_aligned = h1_s.bias == confluence.consensus_bias
 
         return decide(
             cfg=self.cfg,
@@ -168,4 +218,6 @@ class InstitutionalAnalyzer:
             news_block=news.block_trading,
             session_ok=session.trade_window_ok,
             htf_aligned=htf_aligned,
+            h1_aligned=h1_aligned,
+            playbooks=playbooks,
         )
