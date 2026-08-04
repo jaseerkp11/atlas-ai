@@ -65,8 +65,14 @@ class ManualScanReport:
         }
 
 
-def _grade(area: TradeArea, h1: Bias, killzone: bool, agree_stack: bool) -> tuple[str, str]:
-    """Return (grade, status). With-trend near zones grade higher."""
+def _grade(
+    area: TradeArea,
+    h1: Bias,
+    killzone: bool,
+    agree_stack: bool,
+    market_mid: float,
+) -> tuple[str, str]:
+    """Return (grade, status). Prefer pullback zones in bias direction."""
     with_trend = (area.side == "BUY" and h1 == Bias.BULLISH) or (
         area.side == "SELL" and h1 == Bias.BEARISH
     )
@@ -86,10 +92,26 @@ def _grade(area: TradeArea, h1: Bias, killzone: bool, agree_stack: bool) -> tupl
     if against:
         return "B", "AVOID_NOW"
 
+    # Path context vs live mid
+    if area.side == "BUY":
+        in_path = area.mid_price <= market_mid + 1e-9  # at/below = pullback path
+        already_passed = area.price_high < market_mid  # fully below
+        above_market = area.price_low > market_mid  # need rally/reclaim first
+    else:
+        in_path = area.mid_price >= market_mid - 1e-9
+        already_passed = area.price_low > market_mid
+        above_market = area.price_high < market_mid
+
     near = area.distance_atr <= 1.6
     strong = area.score >= 82
+
+    if with_trend and above_market and near:
+        # e.g. buy liquidity ABOVE current price while long-biased → reclaim plan, not dip plan
+        return ("A" if strong else "B"), "WAIT_FOR_RECLAIM"
+
     elite = (
         with_trend
+        and in_path
         and near
         and strong
         and premium_kind
@@ -99,23 +121,45 @@ def _grade(area: TradeArea, h1: Bias, killzone: bool, agree_stack: bool) -> tupl
     )
     if elite:
         return "A+", "WAIT_FOR_TRIGGER"
-    if with_trend and near and area.score >= 75:
+    if with_trend and in_path and near and area.score >= 75:
         return "A", "WAIT_FOR_TRIGGER" if premium_kind or area.score >= 85 else "READY_TO_WATCH"
+    if with_trend and already_passed and area.score >= 80:
+        return "A", "WAIT_FOR_TRIGGER"
     if with_trend and area.score >= 70:
-        return "A", "READY_TO_WATCH"
+        return "A" if in_path else "B", "READY_TO_WATCH" if in_path else "WAIT_FOR_RECLAIM"
     return "B", "READY_TO_WATCH"
 
 
-def _if_then(area: TradeArea) -> tuple[str, list[str], str, str]:
-    lo, hi, mid = area.price_low, area.price_high, area.mid_price
+def _if_then(area: TradeArea, market_mid: float) -> tuple[str, list[str], str, str]:
+    lo, hi, focus = area.price_low, area.price_high, area.mid_price
     kind = area.kind
     if area.side == "BUY":
         inv = f"Invalidate long idea if M5 closes below {lo - (hi - lo) * 0.35:.2f} and holds"
-        avoid = f"Do not chase longs above resistance / mid if price never tags {lo:.2f}-{hi:.2f}"
-        if kind == "buy_liquidity":
+        avoid = f"Do not chase longs mid-air — only act at {lo:.2f}-{hi:.2f} with confirmation"
+        above = lo > market_mid
+        if above and kind == "buy_liquidity":
             ift = (
-                f"IF price sweeps below {mid:.2f} (buy-side liquidity) THEN reclaim back above "
-                f"{mid:.2f} on M5 close → look LONG"
+                f"Price is already below {focus:.2f}. IF it reclaims back above {focus:.2f} "
+                f"on M5 close (after the liquidity run) THEN look LONG continuation"
+            )
+            conf = [
+                f"Mark {focus:.2f} as reclaimed liquidity line",
+                "Need M5 close back above the level — not just a wick",
+                "If it keeps making lower lows, abandon reclaim idea",
+            ]
+        elif above:
+            ift = (
+                f"Zone is above mid ({market_mid:.2f}). IF price rallies into {lo:.2f}-{hi:.2f} "
+                f"and holds as support (flip) THEN look LONG — else ignore for now"
+            )
+            conf = [
+                "This is not a dip-buy yet — wait for price to reach the zone",
+                "Prefer reaction as support after reclaim",
+            ]
+        elif kind == "buy_liquidity":
+            ift = (
+                f"IF price sweeps below {focus:.2f} (buy-side liquidity) THEN reclaim back above "
+                f"{focus:.2f} on M5 close → look LONG"
             )
             conf = [
                 "Mark equal lows / liquidity pool on TradingView",
@@ -140,7 +184,7 @@ def _if_then(area: TradeArea) -> tuple[str, list[str], str, str]:
                 "Plot Fib swing; focus 61.8–78.6",
                 "Need displacement prior + reaction in pocket",
             ]
-        else:  # support
+        else:
             ift = (
                 f"IF price dips into support {lo:.2f}-{hi:.2f} THEN bullish M5 pin/engulf → look LONG"
             )
@@ -150,13 +194,28 @@ def _if_then(area: TradeArea) -> tuple[str, list[str], str, str]:
             ]
         return ift, conf, inv, avoid
 
-    # SELL
     inv = f"Invalidate short idea if M5 closes above {hi + (hi - lo) * 0.35:.2f} and holds"
-    avoid = f"Do not chase shorts into support if price never tags {lo:.2f}-{hi:.2f}"
-    if kind == "sell_liquidity":
+    avoid = f"Do not chase shorts mid-air — only act at {lo:.2f}-{hi:.2f} with confirmation"
+    below = hi < market_mid
+    if below and kind == "sell_liquidity":
         ift = (
-            f"IF price sweeps above {mid:.2f} (sell-side liquidity) THEN rejects back below "
-            f"{mid:.2f} on M5 close → look SHORT"
+            f"Price is already above {focus:.2f}. IF it rejects back below {focus:.2f} "
+            f"on M5 close THEN look SHORT continuation"
+        )
+        conf = [
+            f"Mark {focus:.2f} as rejected liquidity line",
+            "Need M5 close back below — not just a wick",
+        ]
+    elif below:
+        ift = (
+            f"Zone is below mid ({market_mid:.2f}). IF price falls into {lo:.2f}-{hi:.2f} "
+            f"and rejects as resistance (flip) THEN look SHORT — else ignore for now"
+        )
+        conf = ["Not a fade yet — wait for price to reach the zone"]
+    elif kind == "sell_liquidity":
+        ift = (
+            f"IF price sweeps above {focus:.2f} (sell-side liquidity) THEN rejects back below "
+            f"{focus:.2f} on M5 close → look SHORT"
         )
         conf = [
             "Mark equal highs / liquidity pool",
@@ -199,6 +258,7 @@ def build_manual_scan(
 ) -> ManualScanReport:
     killzone = session_name in ("London", "NewYork", "London-NY Overlap")
     agree_stack = h1_bias != Bias.NEUTRAL and h1_bias == m15_bias
+    market_mid = float(narrative.mid)
 
     if h1_bias == Bias.BULLISH:
         stance = "LONG_BIAS"
@@ -219,19 +279,15 @@ def build_manual_scan(
     cards: list[SetupCard] = []
     areas = (trade_areas.areas if trade_areas else [])[:12]
     for a in areas:
-        grade, status = _grade(a, h1_bias, killzone, agree_stack)
-        ift, conf, inv, avoid = _if_then(a)
+        grade, status = _grade(a, h1_bias, killzone, agree_stack, market_mid)
+        ift, conf, inv, avoid = _if_then(a, market_mid)
         reasons = list(a.reasons[:3])
-        if playbooks and playbooks.best and playbooks.best.bias.value.startswith(a.side[:3]):
-            # BUY vs BULLISH — simple link
-            pass
         if playbooks and playbooks.best:
             if (a.side == "BUY" and playbooks.best.bias == Bias.BULLISH) or (
                 a.side == "SELL" and playbooks.best.bias == Bias.BEARISH
             ):
                 reasons.append(f"Supports playbook: {playbooks.best.name}")
 
-        # Soften counter-trend cards
         if status == "AVOID_NOW":
             ift = "AGAINST H1 bias — skip unless H1 flips. " + ift
 
@@ -253,9 +309,29 @@ def build_manual_scan(
             )
         )
 
-    # Sort: A+ first, then A, then with-trend, then score
+    # Sort: actionable pullback path first, then reclaim, avoid last
     rank = {"A+": 0, "A": 1, "B": 2}
-    cards.sort(key=lambda c: (rank.get(c.grade, 9), 0 if c.status != "AVOID_NOW" else 1, -c.score))
+    status_rank = {
+        "WAIT_FOR_TRIGGER": 0,
+        "READY_TO_WATCH": 1,
+        "WAIT_FOR_RECLAIM": 2,
+        "AVOID_NOW": 3,
+    }
+
+    def _path_key(c: SetupCard) -> tuple:
+        if c.side == "BUY":
+            below = 0 if c.focus_price <= market_mid else 1
+        else:
+            below = 0 if c.focus_price >= market_mid else 1
+        return (
+            rank.get(c.grade, 9),
+            status_rank.get(c.status, 9),
+            below,
+            abs(c.focus_price - market_mid),
+            -c.score,
+        )
+
+    cards.sort(key=_path_key)
 
     buy = [c for c in cards if c.side == "BUY"][:5]
     sell = [c for c in cards if c.side == "SELL"][:5]
@@ -269,10 +345,24 @@ def build_manual_scan(
     if playbooks and playbooks.unlock_hints:
         watchlist.extend(f"Wait: {u}" for u in playbooks.unlock_hints[:3])
 
+    # One clear focus line for the trader
+    focus_cards = [
+        c
+        for c in (buy if stance == "LONG_BIAS" else sell if stance == "SHORT_BIAS" else cards)
+        if c.status in ("WAIT_FOR_TRIGGER", "READY_TO_WATCH") and c.grade in ("A+", "A")
+    ]
+    if focus_cards:
+        f0 = focus_cards[0]
+        watchlist.insert(
+            0,
+            f"FOCUS NOW: [{f0.grade}] {f0.side} {f0.zone_low:.2f}-{f0.zone_high:.2f} — {f0.status}",
+        )
+
     do_not = [
         "Do NOT auto-trade from this scanner — confirm on TradingView yourself",
         "Do NOT enter mid-range without tagging a graded zone + IF/THEN trigger",
         "Do NOT fight H1 bias on B-grade / AVOID_NOW cards",
+        "Do NOT treat WAIT_FOR_RECLAIM zones above/below mid as immediate dip entries",
     ]
     if not killzone:
         do_not.append("Outside killzone — reduce size or skip until London/NY")
@@ -282,13 +372,19 @@ def build_manual_scan(
     if buy and sell:
         summary = (
             f"stance={stance} A+={a_plus} A={a_cnt} | "
-            f"best BUY @{buy[0].focus_price:.2f}[{buy[0].grade}] | "
-            f"best SELL @{sell[0].focus_price:.2f}[{sell[0].grade}]"
+            f"best BUY @{buy[0].focus_price:.2f}[{buy[0].grade}/{buy[0].status}] | "
+            f"best SELL @{sell[0].focus_price:.2f}[{sell[0].grade}/{sell[0].status}]"
         )
     elif buy:
-        summary = f"stance={stance} A+={a_plus} A={a_cnt} | best BUY @{buy[0].focus_price:.2f}[{buy[0].grade}]"
+        summary = (
+            f"stance={stance} A+={a_plus} A={a_cnt} | "
+            f"best BUY @{buy[0].focus_price:.2f}[{buy[0].grade}/{buy[0].status}]"
+        )
     elif sell:
-        summary = f"stance={stance} A+={a_plus} A={a_cnt} | best SELL @{sell[0].focus_price:.2f}[{sell[0].grade}]"
+        summary = (
+            f"stance={stance} A+={a_plus} A={a_cnt} | "
+            f"best SELL @{sell[0].focus_price:.2f}[{sell[0].grade}/{sell[0].status}]"
+        )
     else:
         summary = f"stance={stance} cards={len(cards)} A+={a_plus} A={a_cnt}"
 

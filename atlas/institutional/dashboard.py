@@ -6,18 +6,19 @@ from atlas.institutional.models import DecisionAction, InstitutionalDecision
 
 
 def _setup_status(decision: InstitutionalDecision) -> str:
-    """Reframe engine action as manual setup status."""
+    """Reframe engine action as manual setup status (never 'buy now')."""
     ms = ""
     if decision.narrative:
         ms = str(decision.narrative.extras.get("manual_stance") or "")
     if decision.action == DecisionAction.WAIT:
         return "SETUP FORMING — wait for IF/THEN trigger on TradingView"
     if decision.action == DecisionAction.NO_TRADE:
-        return "STAND ASIDE — map levels only; no A+ trigger ready"
+        return "STAND ASIDE — map levels only; no clean trigger yet"
     if decision.action in (DecisionAction.BUY, DecisionAction.SELL):
+        side = "LONG" if decision.action == DecisionAction.BUY else "SHORT"
         return (
-            f"ZONE ALIGNED ({decision.action.value}) — still confirm IF/THEN on TradingView "
-            f"(manual only; bot does not send orders)"
+            f"BIAS ALIGNED ({side}) — NOT an entry signal. "
+            f"Only trade if an A+/A zone IF/THEN confirms on TradingView"
         )
     return f"STATUS={decision.action.value} stance={ms}"
 
