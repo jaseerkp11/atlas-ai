@@ -1,0 +1,91 @@
+# ATLAS — Live scalp / challenge profile
+# Structure from H1 + M15 (real strategy context). Entry trigger on M5 close.
+
+mode: LIVE
+
+profile: scalp_challenge
+
+symbols:
+  - EURUSD
+  - GBPUSD
+  - USDJPY
+  - AUDUSD
+  - USDCAD
+  - USDCHF
+  - NZDUSD
+  - EURGBP
+  - EURJPY
+  - GBPJPY
+  - AUDNZD
+  - CADJPY
+  - XAUUSD
+
+# Top-down: H4 bias → H1 trend → M15 setup zones → M5 entry trigger
+timeframes:
+  regime: H4
+  trend: H1
+  setup: M15
+  entry: M5
+
+gates:
+  min_score: 75
+  min_reward_risk: 3.0
+
+scoring_weights:
+  h4_regime_alignment: 15
+  h1_trend_confirmation: 15
+  structure_break: 15
+  liquidity_sweep: 12
+  fair_value_gap: 10
+  order_block: 10
+  m5_trigger: 13
+  volatility_context: 5
+  vwap_alignment: 5
+
+risk:
+  risk_percent: 0.4
+  atr_period: 14
+  atr_stop_multiplier: 1.0
+  atr_target_multiplier: 3.0
+  max_concurrent_trades: 2
+  daily_loss_limit_percent: 2.0
+  max_spread_pips:
+    default: 2.0
+    XAUUSD: 35.0
+    USDJPY: 2.5
+    GBPJPY: 3.5
+    EURJPY: 3.0
+    CADJPY: 3.0
+
+sessions:
+  london: [7, 16]
+  new_york: [12, 21]
+  allowed_hours_utc: [7, 23]
+
+analysis:
+  swing_lookback: 4
+  structure_lookback: 50
+  # M15 lookbacks (~ recent session, not days-old junk)
+  fvg_lookback: 40
+  order_block_lookback: 40
+  liquidity_lookback: 30
+  equal_level_tolerance_atr: 0.15
+  structure_max_age_bars: 40
+  structure_proximity_atr: 4.0
+  sr_proximity_atr: 6.0
+  watch_signal_timeframe: M5
+  watch_interval_seconds: 10
+  scalp_market_entry: true
+  use_closed_m5_only: true
+  vwap_session_reset: true     # reset VWAP each UTC day
+  vwap_near_atr_mult: 0.5      # "near VWAP" entry zone = 0.5 × ATR
+
+backtest:
+  initial_balance: 10000.0
+  history_bars_m5: 5000
+  pending_expiry_bars: 6
+
+paths:
+  journal_dir: journals
+  log_dir: logs
+  backtest_dir: journals/backtest
