@@ -27,6 +27,7 @@ class InstitutionalConfig:
     min_reward_risk: float
     require_htf_alignment: bool
     require_m1_timing: bool
+    require_playbook: bool
     weights: dict[str, float]
     risk: dict[str, Any]
     news: dict[str, Any]
@@ -66,6 +67,7 @@ def load_institutional_config(reload: bool = False) -> InstitutionalConfig:
         min_reward_risk=float(t["min_reward_risk"]),
         require_htf_alignment=bool(t["require_htf_alignment"]),
         require_m1_timing=bool(t["require_m1_timing"]),
+        require_playbook=bool(t.get("require_playbook", True)),
         weights={k: float(v) for k, v in t["weights"].items()},
         risk=dict(t["risk"]),
         news=dict(t["news"]),

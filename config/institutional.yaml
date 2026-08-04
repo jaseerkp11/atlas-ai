@@ -18,6 +18,7 @@ institutional:
   # H1 is primary HTF for XAUUSD; H4 soft (transitional OK if H1 aligns)
   require_htf_alignment: true
   require_m1_timing: true
+  # Require a world-SMC playbook hit before BUY/SELL (analyze still always prints full narrative)
   require_playbook: true
 
   # Confluence weights (sum ≈ 100)

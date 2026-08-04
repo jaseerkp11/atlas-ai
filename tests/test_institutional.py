@@ -51,6 +51,7 @@ def test_config_gates_quality_first():
     assert cfg.min_probability >= 70
     assert cfg.min_confluence >= 65
     assert cfg.require_htf_alignment is True
+    assert cfg.require_playbook is True
     assert "H4" in cfg.timeframes and "M1" in cfg.timeframes
 
 
@@ -160,8 +161,39 @@ def test_cli_analyze_registered():
 
 def test_dashboard_renders():
     from atlas.institutional.dashboard import render_dashboard
-    from atlas.institutional.models import InstitutionalDecision, RiskLevel
+    from atlas.institutional.models import InstitutionalDecision, MarketNarrative, RiskLevel, utcnow
 
+    n = MarketNarrative(
+        symbol="XAUUSD",
+        as_of=utcnow(),
+        overall_bias=Bias.BULLISH,
+        htf_bias=Bias.NEUTRAL,
+        mtf_bias=Bias.BULLISH,
+        structure_summary="test",
+        liquidity_summary="test",
+        institutional_confluence="test",
+        sr_summary="test",
+        trend_quality="Transitional",
+        volatility_regime="ATR=1",
+        best_session="London",
+        news_status="ok",
+        extras={
+            "h1_bias": "BULLISH",
+            "h4_bias": "NEUTRAL",
+            "m15_bias": "BULLISH",
+            "playbook": "playbooks=0",
+            "playbook_hits": [],
+            "scenario": {
+                "primary": "LONG bias wait",
+                "alternate": "flip",
+                "invalidation": "H1 flip",
+                "edge_score": 44,
+                "summary": "edge=44",
+                "checklist": [{"name": "H1", "ok": True, "detail": "BULLISH"}],
+                "next_triggers": ["Wait for OTE"],
+            },
+        },
+    )
     d = InstitutionalDecision(
         action=DecisionAction.NO_TRADE,
         why=["test"],
@@ -169,7 +201,45 @@ def test_dashboard_renders():
         probability=40,
         confluence=40,
         risk_level=RiskLevel.HIGH,
+        narrative=n,
     )
     text = render_dashboard(d)
     assert "DECISION: NO_TRADE" in text
     assert "INSTITUTIONAL" in text
+    assert "AI SCENARIO PLAN" in text
+    assert "HIGH-PROBABILITY PLAYBOOKS" in text
+
+
+def test_discount_array_playbook():
+    from atlas.institutional.models import MarketNarrative, utcnow
+    from atlas.institutional.playbook_engine import evaluate_playbooks
+
+    n = MarketNarrative(
+        symbol="XAUUSD",
+        as_of=utcnow(),
+        overall_bias=Bias.BULLISH,
+        htf_bias=Bias.BULLISH,
+        mtf_bias=Bias.BULLISH,
+        structure_summary="discount",
+        liquidity_summary="x",
+        institutional_confluence="x",
+        sr_summary="x",
+        trend_quality="Trending",
+        volatility_regime="ok",
+        best_session="London",
+        news_status="ok",
+        mid=4050.0,
+        atr_m15=5.0,
+    )
+    mods = [
+        ModuleScore("market_structure", 70, 14, Bias.BULLISH, "trend=LONG/MODERATE | discount", True),
+        ModuleScore("liquidity", 40, 10, Bias.NEUTRAL, "sweep=none", False),
+        ModuleScore("price_action", 50, 8, Bias.NEUTRAL, "none", False),
+        ModuleScore("session", 80, 4, Bias.NEUTRAL, "London", True),
+    ]
+    pb = evaluate_playbooks(
+        n, mods, Bias.BULLISH, "London", Bias.BULLISH, m15_bias=Bias.BULLISH
+    )
+    names = [h.name for h in pb.hits]
+    assert any("Discount Array" in x or "Structure Stack" in x for x in names)
+    assert pb.total_boost >= 9

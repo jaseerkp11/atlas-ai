@@ -8,9 +8,11 @@ Same rules as scalp watch:
 
 from __future__ import annotations
 
+import json
 import logging
 import time
 from datetime import datetime, timezone
+from pathlib import Path
 
 from atlas.institutional.analyzer import InstitutionalAnalyzer
 from atlas.institutional.config import InstitutionalConfig, load_institutional_config
@@ -19,6 +21,32 @@ from atlas.institutional.risk_manager import InstitutionalRiskManager
 from atlas.live.watch import _next_m5_boundary_utc, last_closed_m5_key
 
 logger = logging.getLogger(__name__)
+
+
+def _journal_decision(cfg: InstitutionalConfig, m5_key: str, decision, text: str) -> None:
+    try:
+        log_dir = Path(cfg.log_dir)
+        log_dir.mkdir(parents=True, exist_ok=True)
+        day = datetime.now(timezone.utc).strftime("%Y%m%d")
+        path = log_dir / f"m5_{day}.jsonl"
+        sc = (decision.narrative.extras.get("scenario") if decision.narrative else None) or {}
+        row = {
+            "m5": m5_key,
+            "as_of": datetime.now(timezone.utc).isoformat(),
+            "action": decision.action.value,
+            "probability": decision.probability,
+            "confidence": decision.confidence,
+            "confluence": decision.confluence,
+            "edge": sc.get("edge_score"),
+            "playbook": (decision.narrative.extras.get("playbook") if decision.narrative else None),
+            "why": decision.why[:6],
+        }
+        with path.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(row, ensure_ascii=False) + "\n")
+        dash = log_dir / f"last_dashboard_{day}.txt"
+        dash.write_text(text, encoding="utf-8")
+    except Exception as exc:
+        logger.debug("journal skip: %s", exc)
 
 
 class InstitutionalWatch:
@@ -38,10 +66,10 @@ class InstitutionalWatch:
         print(f"  Symbol : {self.cfg.symbol} | Mode: {self.cfg.mode}")
         print(
             f"  Gates  : prob≥{self.cfg.min_probability} conf≥{self.cfg.min_confidence} "
-            f"confl≥{self.cfg.min_confluence}"
+            f"confl≥{self.cfg.min_confluence} playbook={'ON' if self.cfg.require_playbook else 'OFF'}"
         )
-        print("  Cycle  : analyze ONLY on each new closed M5")
-        print("  Style  : high-probability playbooks · prefer NO TRADE")
+        print("  Cycle  : full institutional analysis ONLY on each new closed M5")
+        print("  Style  : world SMC playbooks · AI checklist · prefer NO TRADE")
         print("=" * 72)
 
         if not self.analyzer.connect():
@@ -70,9 +98,11 @@ class InstitutionalWatch:
 
                 prev = cur
                 cycles += 1
-                print(f"\n>>> NEW M5 CLOSE {cur} — running institutional analysis #{cycles}")
+                print(f"\n>>> NEW M5 CLOSE {cur} — institutional high-prob analysis #{cycles}")
                 decision = self.analyzer.analyze(self.cfg.symbol, frames=frames)
-                print(render_dashboard(decision))
+                text = render_dashboard(decision)
+                print(text)
+                _journal_decision(self.cfg, str(cur), decision, text)
 
                 if self.execute and decision.is_executable():
                     eq = 10000.0

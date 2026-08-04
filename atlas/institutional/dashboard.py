@@ -1,8 +1,8 @@
-"""Terminal institutional dashboard — narrative + decision."""
+"""Terminal institutional dashboard — narrative + high-probability checklist."""
 
 from __future__ import annotations
 
-from atlas.institutional.models import InstitutionalDecision, MarketNarrative
+from atlas.institutional.models import InstitutionalDecision
 
 
 def render_dashboard(decision: InstitutionalDecision) -> str:
@@ -10,13 +10,17 @@ def render_dashboard(decision: InstitutionalDecision) -> str:
     lines: list[str] = []
     lines.append("=" * 72)
     lines.append("  ATLAS INSTITUTIONAL MARKET ANALYSIS ENGINE")
+    lines.append("  High-probability SMC · quality over quantity · prefer NO TRADE")
     lines.append("=" * 72)
     if n:
         lines.append(f"  Symbol        : {n.symbol}")
         lines.append(f"  As of (UTC)   : {n.as_of.isoformat()}")
         lines.append(f"  Mid / ATR     : {n.mid:.3f} / {n.atr_m15:.3f}")
+        h1 = n.extras.get("h1_bias", n.overall_bias.value)
+        h4 = n.extras.get("h4_bias", n.htf_bias.value)
+        m15 = n.extras.get("m15_bias", n.mtf_bias.value)
         lines.append(f"  Overall Bias  : {n.overall_bias.value}")
-        lines.append(f"  HTF Bias      : {n.htf_bias.value}   MTF: {n.mtf_bias.value}")
+        lines.append(f"  HTF stack     : H4={h4}  H1={h1} (primary)  M15={m15}")
         lines.append(f"  Trend Quality : {n.trend_quality}")
         lines.append(f"  Volatility    : {n.volatility_regime}")
         lines.append(f"  Best Session  : {n.best_session}")
@@ -51,13 +55,45 @@ def render_dashboard(decision: InstitutionalDecision) -> str:
                     f"   {mark} {lv.ratio:5.3f} @ {lv.price:.2f}  "
                     f"{lv.classification:18} ({lv.timeframe}) score={lv.score:.0f}"
                 )
+
+        # High-probability playbooks
+        lines.append("-" * 72)
+        lines.append("  HIGH-PROBABILITY PLAYBOOKS")
+        hits = n.extras.get("playbook_hits") or []
+        if hits:
+            for h in hits:
+                lines.append(
+                    f"    • {h['name']:32} {h['bias']:8}  boost=+{h['boost']:.0f}"
+                )
+        else:
+            lines.append("    (none active — stand aside)")
+        if n.extras.get("playbook"):
+            lines.append(f"  Stack: {n.extras.get('playbook')}")
+
+        # Scenario / checklist
+        sc = n.extras.get("scenario") or {}
+        if sc:
+            lines.append("-" * 72)
+            lines.append("  AI SCENARIO PLAN")
+            lines.append(f"  Primary      : {sc.get('primary', '')}")
+            lines.append(f"  Alternate    : {sc.get('alternate', '')}")
+            lines.append(f"  Invalidation : {sc.get('invalidation', '')}")
+            lines.append(f"  Edge score   : {sc.get('edge_score', 0):.0f}/100  ({sc.get('summary', '')})")
+            lines.append("  Checklist:")
+            for c in sc.get("checklist", []):
+                mark = "OK" if c.get("ok") else "--"
+                lines.append(f"    [{mark}] {c.get('name')}: {c.get('detail')}")
+            triggers = sc.get("next_triggers") or n.extras.get("unlock") or []
+            if triggers:
+                lines.append("  Next triggers:")
+                for t in triggers[:5]:
+                    lines.append(f"    → {t}")
+        elif n.extras.get("unlock"):
+            lines.append("  Unlock path:")
+            for h in n.extras["unlock"][:5]:
+                lines.append(f"    → {h}")
+
     lines.append("-" * 72)
     lines.append(decision.summary())
-    if n and n.extras.get("playbook"):
-        lines.append(f"Playbook: {n.extras.get('playbook')}")
-    if n and n.extras.get("unlock"):
-        lines.append("Unlock path:")
-        for h in n.extras["unlock"][:5]:
-            lines.append(f"  → {h}")
     lines.append("=" * 72)
     return "\n".join(lines)

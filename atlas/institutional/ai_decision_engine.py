@@ -19,6 +19,7 @@ from atlas.institutional.models import (
 )
 from atlas.institutional.playbook_engine import PlaybookResult
 from atlas.institutional.price_action import PriceActionReport
+from atlas.institutional.scenario_engine import ScenarioPlan, build_scenario
 import pandas as pd
 
 
@@ -34,6 +35,13 @@ def _risk_level(probability: float, news_block: bool, playbook: bool) -> RiskLev
     return RiskLevel.EXTREME
 
 
+def _attach_scenario(decision: InstitutionalDecision, scenario: ScenarioPlan) -> InstitutionalDecision:
+    if decision.narrative is not None:
+        decision.narrative.extras["scenario"] = scenario.as_dict()
+        decision.narrative.extras["edge_score"] = scenario.edge_score
+    return decision
+
+
 def decide(
     cfg: InstitutionalConfig,
     narrative: MarketNarrative,
@@ -46,19 +54,42 @@ def decide(
     htf_aligned: bool,
     h1_aligned: bool,
     playbooks: PlaybookResult | None = None,
+    h1_bias: Bias = Bias.NEUTRAL,
+    h4_bias: Bias = Bias.NEUTRAL,
+    m15_bias: Bias = Bias.NEUTRAL,
 ) -> InstitutionalDecision:
     why: list[str] = []
     unlock = list(playbooks.unlock_hints) if playbooks else []
 
+    scenario = build_scenario(
+        narrative=narrative,
+        playbooks=playbooks,
+        h1_bias=h1_bias,
+        h4_bias=h4_bias,
+        m15_bias=m15_bias,
+        h1_aligned=h1_aligned,
+        session_ok=session_ok,
+        news_block=news_block,
+        probability=confluence.probability,
+        confluence=confluence.confluence,
+        confidence=confluence.confidence,
+        min_probability=cfg.min_probability,
+        min_confluence=cfg.min_confluence,
+        min_confidence=cfg.min_confidence,
+    )
+
     def _blocked(action: DecisionAction, extra: list[str], risk: RiskLevel) -> InstitutionalDecision:
         hints = unlock[:4]
+        body = list(extra)
         if hints:
-            extra = extra + ["Unlock path:"] + [f"  → {h}" for h in hints]
+            body = body + ["Unlock path:"] + [f"  → {h}" for h in hints]
         if playbooks and playbooks.summary:
-            extra.append(f"Playbooks: {playbooks.summary}")
-        return InstitutionalDecision(
+            body.append(f"Playbooks: {playbooks.summary}")
+        body.append(f"Scenario: {scenario.primary}")
+        body.append(f"Edge checklist: {scenario.summary}")
+        d = InstitutionalDecision(
             action=action,
-            why=extra,
+            why=body,
             confidence=confluence.confidence,
             probability=confluence.probability,
             confluence=confluence.confluence,
@@ -67,6 +98,7 @@ def decide(
             ltf_confirm=False,
             narrative=narrative,
         )
+        return _attach_scenario(d, scenario)
 
     if news_block:
         return _blocked(
@@ -89,6 +121,7 @@ def decide(
             [
                 "H1 not aligned with trade bias — quality gate failed",
                 f"H1 must agree with {confluence.consensus_bias.value} (primary HTF for XAUUSD)",
+                f"H4={h4_bias.value} is soft filter only (transitional OK when H1 agrees)",
             ],
             RiskLevel.HIGH,
         )
@@ -99,7 +132,7 @@ def decide(
         why.append("Session quality soft warning — prefer London/NY")
 
     # Prefer at least one playbook for EXECUTE (higher probability AI)
-    require_pb = True
+    require_pb = bool(getattr(cfg, "require_playbook", True))
     if require_pb and (not playbooks or not playbooks.best or playbooks.total_boost < 10):
         return _blocked(
             DecisionAction.WAIT,
@@ -180,13 +213,18 @@ def decide(
     if playbooks and playbooks.best:
         why.append(f"PLAYBOOK: {playbooks.best.name} (+{playbooks.total_boost:.0f})")
         why.extend(playbooks.best.reasons)
+        if len(playbooks.hits) > 1:
+            why.append(
+                "Stacked: " + ", ".join(f"{h.name}(+{h.boost:.0f})" for h in playbooks.hits[:3])
+            )
     why.append(f"Structure: {narrative.structure_summary}")
     why.append(f"Liquidity: {narrative.liquidity_summary}")
     why.append(f"PA: {pa.summary}")
     why.append(f"Session: {narrative.best_session} | News: {narrative.news_status}")
+    why.append(scenario.primary)
     why.append("High-probability confirmations aligned — quality gate PASSED")
 
-    return InstitutionalDecision(
+    d = InstitutionalDecision(
         action=action,
         why=why,
         confidence=confluence.confidence,
@@ -203,3 +241,4 @@ def decide(
         invalidation=stop,
         narrative=narrative,
     )
+    return _attach_scenario(d, scenario)
