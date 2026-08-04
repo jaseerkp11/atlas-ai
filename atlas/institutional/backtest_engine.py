@@ -103,6 +103,20 @@ class BTResult:
         selectivity = (
             100.0 * (self.no_trade + self.wait) / max(1, self.no_trade + self.wait + self.signals)
         )
+        # With configured ~1:2.5 R:R, breakeven win-rate ≈ 1/(1+2.5)=28.6%
+        be_wr = 28.6
+        n = len(self.trades)
+        if n < 30:
+            trust = "LOW SAMPLE — do not trust yet (need ≥30 closed trades)"
+        elif self.expectancy > 0.15 and self.profit_factor >= 1.3 and self.max_dd_r > -12:
+            trust = "PROMISING on this sample — still PAPER-validate live"
+        elif self.expectancy > 0 and self.profit_factor >= 1.05:
+            trust = "MARGINAL edge — use as chart assistant only, not auto-trust"
+        elif self.expectancy > -0.05 and abs(self.profit_factor - 1.0) < 0.15:
+            trust = "NEAR BREAKEVEN — do NOT trust for LIVE auto trading"
+        else:
+            trust = "NEGATIVE / WEAK on this sample — do NOT trust for LIVE"
+
         return [
             "=" * 64,
             "  INSTITUTIONAL BACKTEST SCORECARD (sample — not a live claim)",
@@ -113,17 +127,19 @@ class BTResult:
             f"  NO_TRADE        : {self.no_trade}",
             f"  WAIT            : {self.wait}",
             f"  Selectivity     : {selectivity:.1f}% stand-aside of decided bars",
-            f"  Closed trades   : {len(self.trades)}",
-            f"  Win rate        : {self.win_rate}%",
-            f"  Profit factor   : {pf}",
-            f"  Expectancy (R)  : {self.expectancy}",
+            f"  Closed trades   : {n}",
+            f"  Win rate        : {self.win_rate}%   (breakeven≈{be_wr}% at ~1:2.5 R:R)",
+            f"  Profit factor   : {pf}   ← trust this more than win rate",
+            f"  Expectancy (R)  : {self.expectancy}   ← average R per trade",
             f"  Max DD (R)      : {self.max_dd_r}",
             f"  Avg prob signal : {self.avg_prob_signal:.1f}%",
             f"  Avg prob aside  : {self.avg_prob_standaside:.1f}%",
             f"  Avg area score  : {self.avg_area_score:.1f}/100",
             f"  QUALITY SCORE   : {self.quality_score}/100",
+            f"  TRUST READ      : {trust}",
             "-" * 64,
-            "  Read: high NO_TRADE + selective signals is intentional.",
+            "  Win rate alone is NOT the score. With ~1:2.5 R:R, ~29% WR can still",
+            "  be profitable if PF>1 and Expectancy>0. Prefer MT5 XAUUSD history.",
             "  Validate on PAPER with live MT5 before any LIVE use.",
             "=" * 64,
         ]

@@ -256,31 +256,63 @@ def cmd_institutional_backtest(args: argparse.Namespace) -> int:
     from atlas.institutional.config import load_institutional_config
 
     cfg = load_institutional_config(reload=True)
-    if getattr(args, "m5_bars", None):
-        import yfinance as yf
+    m5_bars = getattr(args, "m5_bars", None)
+    if m5_bars:
+        m5 = None
+        data_source = ""
+        # Prefer YOUR broker MT5 XAUUSD history (real score). Yahoo only as fallback.
+        from atlas.execution.mt5_client import MT5Client
 
-        print(f"Fetching GC=F 5m history for {args.m5_bars} bars…")
-        raw = yf.Ticker("GC=F").history(period="60d", interval="5m", auto_adjust=True)
-        if raw is None or len(raw) < 100:
-            print("ERROR: could not fetch Yahoo GC=F 5m history")
-            return 1
-        m5 = raw.reset_index().rename(
-            columns={
-                "Datetime": "time",
-                "Open": "open",
-                "High": "high",
-                "Low": "low",
-                "Close": "close",
-                "Volume": "tick_volume",
-            }
-        )
+        client = MT5Client()
+        client.connect()
+        if client.using_live_market_data:
+            need = int(m5_bars) + int(getattr(args, "warmup", 250) or 250) + 50
+            raw = client.copy_rates(cfg.symbol, "M5", need)
+            if raw is not None and len(raw) >= 300:
+                m5 = raw.rename(columns={"volume": "tick_volume"})
+                if "tick_volume" not in m5.columns:
+                    m5["tick_volume"] = 100
+                data_source = f"MT5_{cfg.symbol}_M5_{m5_bars}"
+                print(
+                    f"Using MT5 live history: {cfg.symbol} M5 bars={len(m5)} "
+                    f"(requested window {m5_bars})"
+                )
+            else:
+                print("WARNING: MT5 M5 history too short — falling back to Yahoo GC=F")
+        else:
+            print("WARNING: MT5 live data not available — falling back to Yahoo GC=F proxy")
+        client.disconnect()
+
+        if m5 is None:
+            try:
+                import yfinance as yf
+            except ImportError:
+                print("ERROR: install yfinance OR run on Windows with MT5 for real history")
+                return 1
+            print(f"Fetching Yahoo GC=F 5m proxy for {m5_bars} bars…")
+            raw = yf.Ticker("GC=F").history(period="60d", interval="5m", auto_adjust=True)
+            if raw is None or len(raw) < 100:
+                print("ERROR: could not fetch Yahoo GC=F 5m history")
+                return 1
+            m5 = raw.reset_index().rename(
+                columns={
+                    "Datetime": "time",
+                    "Open": "open",
+                    "High": "high",
+                    "Low": "low",
+                    "Close": "close",
+                    "Volume": "tick_volume",
+                }
+            )
+            data_source = f"YAHOO_GC=F_M5_{m5_bars}_PROXY"
+
         result = run_m5_institutional_backtest(
             m5,
-            bars=int(args.m5_bars),
+            bars=int(m5_bars),
             warmup=int(getattr(args, "warmup", 250) or 250),
             step=int(args.step),
             on_log=print if not args.quiet else (lambda m: None),
-            data_source=f"YAHOO_GC=F_M5_{args.m5_bars}",
+            data_source=data_source,
         )
     else:
         from atlas.execution.mt5_client import MT5Client
