@@ -15,7 +15,7 @@ from pathlib import Path
 from atlas.institutional.analyzer import InstitutionalAnalyzer
 from atlas.institutional.config import InstitutionalConfig, load_institutional_config
 from atlas.institutional.dashboard import render_dashboard
-from atlas.live.watch import _next_m5_boundary_utc, last_closed_m5_key
+from atlas.live.watch import last_closed_m5_key
 
 logger = logging.getLogger(__name__)
 
@@ -52,7 +52,6 @@ class InstitutionalWatch:
         execute: bool = False,
     ) -> None:
         self.cfg = cfg or load_institutional_config()
-        # Manual scanner product: ignore execute arming
         if execute:
             print(
                 "NOTE: --execute ignored. This build is a MANUAL scanner only "
@@ -60,45 +59,62 @@ class InstitutionalWatch:
             )
         self.analyzer = InstitutionalAnalyzer(self.cfg)
 
+    def _run_one(self, frames, m5_key: str, cycles: int) -> int:
+        print(f"\n>>> M5 CLOSE {m5_key} — manual high-prob scan #{cycles}")
+        decision = self.analyzer.analyze(self.cfg.symbol, frames=frames)
+        text = render_dashboard(decision)
+        print(text)
+        _journal_decision(self.cfg, str(m5_key), decision, text)
+        return cycles
+
     def start(self, max_cycles: int | None = None) -> None:
         print("=" * 72)
         print("  ATLAS MANUAL HIGH-PROBABILITY M5 SCANNER")
         print(f"  Symbol : {self.cfg.symbol} | Mode: {self.cfg.mode} (analysis only)")
         print("  Output : S/R + graded BUY/SELL areas + IF/THEN triggers")
-        print("  Cycle  : full scan on each new closed M5")
+        print("  Cycle  : scan now, then again on each NEW closed M5")
         print("  Trade  : YOU decide on TradingView — bot never sends orders")
         print("=" * 72)
 
         if not self.analyzer.connect():
             raise RuntimeError("MT5 connection failed")
 
-        now = datetime.now(timezone.utc)
-        nxt = _next_m5_boundary_utc(now)
-        wait = max(0.0, (nxt - now).total_seconds())
-        print(f"\nWaiting for next M5 close @ {nxt.isoformat()} ({wait:.0f}s)…\n")
-        if wait > 0:
-            time.sleep(min(wait + 1.0, 310.0))
-
         frames = self.analyzer.load_frames(self.cfg.symbol)
         prev = last_closed_m5_key(frames.get("M5"))
-        print(f"Seeded last closed M5={prev}. Scanning…\n")
+        if prev is None:
+            self.analyzer.disconnect()
+            raise RuntimeError("No M5 bars available from MT5")
 
-        cycles = 0
+        # IMPORTANT: run immediately so the user is not left staring at "Scanning…"
+        # Old bug: wait for boundary → seed that close as prev → first print only 5 min later.
+        print(f"\nLast closed M5={prev} (broker bar time). Running scan now…\n")
+        cycles = self._run_one(frames, prev, 1)
+        if max_cycles is not None and cycles >= max_cycles:
+            self.analyzer.disconnect()
+            return
+
+        print("\nWatching for next NEW M5 close (heartbeat every 30s)…\n")
+        last_beat = time.time()
         try:
             while True:
                 time.sleep(3.0)
                 frames = self.analyzer.load_frames(self.cfg.symbol)
                 cur = last_closed_m5_key(frames.get("M5"))
+                now = datetime.now(timezone.utc)
+
                 if cur is None or cur == prev:
+                    if time.time() - last_beat >= 30:
+                        print(
+                            f"… watching | last_M5={prev} | utc={now.strftime('%H:%M:%S')} "
+                            f"| waiting for next closed M5"
+                        )
+                        last_beat = time.time()
                     continue
 
                 prev = cur
                 cycles += 1
-                print(f"\n>>> NEW M5 CLOSE {cur} — manual high-prob scan #{cycles}")
-                decision = self.analyzer.analyze(self.cfg.symbol, frames=frames)
-                text = render_dashboard(decision)
-                print(text)
-                _journal_decision(self.cfg, str(cur), decision, text)
+                cycles = self._run_one(frames, cur, cycles)
+                last_beat = time.time()
 
                 if max_cycles is not None and cycles >= max_cycles:
                     break
