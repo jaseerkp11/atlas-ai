@@ -249,28 +249,59 @@ def cmd_institutional(args: argparse.Namespace) -> int:
 
 
 def cmd_institutional_backtest(args: argparse.Namespace) -> int:
-    from atlas.execution.mt5_client import MT5Client
-    from atlas.institutional.backtest_engine import run_institutional_backtest
+    from atlas.institutional.backtest_engine import (
+        run_institutional_backtest,
+        run_m5_institutional_backtest,
+    )
     from atlas.institutional.config import load_institutional_config
 
     cfg = load_institutional_config(reload=True)
-    client = MT5Client()
-    client.connect()
-    src = "MT5_LIVE" if client.using_live_market_data else "SYNTHETIC_SAMPLE"
-    frames = {
-        "H4": client.copy_rates(cfg.symbol, "H4", 300),
-        "H1": client.copy_rates(cfg.symbol, "H1", 500),
-        "M15": client.copy_rates(cfg.symbol, "M15", 800),
-        "M5": client.copy_rates(cfg.symbol, "M5", 1000),
-        "M1": client.copy_rates(cfg.symbol, "M1", 500),
-    }
-    client.disconnect()
-    result = run_institutional_backtest(
-        frames,
-        step=args.step,
-        on_log=print if not args.quiet else (lambda m: None),
-        data_source=src,
-    )
+    if getattr(args, "m5_bars", None):
+        import yfinance as yf
+
+        print(f"Fetching GC=F 5m history for {args.m5_bars} bars…")
+        raw = yf.Ticker("GC=F").history(period="60d", interval="5m", auto_adjust=True)
+        if raw is None or len(raw) < 100:
+            print("ERROR: could not fetch Yahoo GC=F 5m history")
+            return 1
+        m5 = raw.reset_index().rename(
+            columns={
+                "Datetime": "time",
+                "Open": "open",
+                "High": "high",
+                "Low": "low",
+                "Close": "close",
+                "Volume": "tick_volume",
+            }
+        )
+        result = run_m5_institutional_backtest(
+            m5,
+            bars=int(args.m5_bars),
+            warmup=int(getattr(args, "warmup", 250) or 250),
+            step=int(args.step),
+            on_log=print if not args.quiet else (lambda m: None),
+            data_source=f"YAHOO_GC=F_M5_{args.m5_bars}",
+        )
+    else:
+        from atlas.execution.mt5_client import MT5Client
+
+        client = MT5Client()
+        client.connect()
+        src = "MT5_LIVE" if client.using_live_market_data else "SYNTHETIC_SAMPLE"
+        frames = {
+            "H4": client.copy_rates(cfg.symbol, "H4", 300),
+            "H1": client.copy_rates(cfg.symbol, "H1", 500),
+            "M15": client.copy_rates(cfg.symbol, "M15", 800),
+            "M5": client.copy_rates(cfg.symbol, "M5", 1000),
+            "M1": client.copy_rates(cfg.symbol, "M1", 500),
+        }
+        client.disconnect()
+        result = run_institutional_backtest(
+            frames,
+            step=args.step,
+            on_log=print if not args.quiet else (lambda m: None),
+            data_source=src,
+        )
     for line in result.summary_lines():
         print(line)
     return 0
@@ -365,7 +396,14 @@ def build_parser() -> argparse.ArgumentParser:
         "institutional-backtest",
         help="Backtest institutional decision engine on historical MT5/synthetic bars",
     )
-    ib.add_argument("--step", type=int, default=8, help="M15 bar step")
+    ib.add_argument("--step", type=int, default=1, help="Bar step (1 = every bar)")
+    ib.add_argument(
+        "--m5-bars",
+        type=int,
+        default=None,
+        help="If set, walk this many Yahoo GC=F 5m bars with structure multi-TF",
+    )
+    ib.add_argument("--warmup", type=int, default=250, help="M5 warmup bars before decisions")
     ib.add_argument("--quiet", action="store_true")
     ib.set_defaults(func=cmd_institutional_backtest)
 
