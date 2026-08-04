@@ -140,8 +140,8 @@ def _from_zone(
     return TradeArea(
         side=side,
         kind=kind,
-        price_low=float(z.bottom),
-        price_high=float(z.top),
+        price_low=min(float(z.bottom), float(z.top)),
+        price_high=max(float(z.bottom), float(z.top)),
         mid_price=float(center),
         score=score,
         distance_atr=dist,

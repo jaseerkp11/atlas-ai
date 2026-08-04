@@ -225,7 +225,13 @@ def cmd_analyze(args: argparse.Namespace) -> int:
         return 1
     try:
         decision = analyzer.analyze(symbol)
-        print(render_dashboard(decision, full=bool(getattr(args, "full", False))))
+        # Default = FULL long analysis. --brief for short card only.
+        brief = bool(getattr(args, "brief", False))
+        full = True if not brief else False
+        if getattr(args, "full", False):
+            full = True
+            brief = False
+        print(render_dashboard(decision, full=full, brief=brief))
     finally:
         analyzer.disconnect()
     return 0
@@ -398,13 +404,18 @@ def build_parser() -> argparse.ArgumentParser:
 
     a = sub.add_parser(
         "analyze",
-        help="Manual high-prob scanner (short brief). Add --full for details",
+        help="Manual high-prob scanner — FULL analysis by default (add --brief for short)",
     )
     a.add_argument("--symbol", default=None, help="Override symbol (default XAUUSD)")
     a.add_argument(
         "--full",
         action="store_true",
-        help="Show full module/fib/playbook dump (default is short brief)",
+        help="Full analysis (default; kept for compatibility)",
+    )
+    a.add_argument(
+        "--brief",
+        action="store_true",
+        help="Short trader card only",
     )
     a.set_defaults(func=cmd_analyze)
 

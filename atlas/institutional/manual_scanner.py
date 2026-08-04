@@ -169,7 +169,7 @@ def _if_then(area: TradeArea, market_mid: float) -> tuple[str, list[str], str, s
         if kind == "buy_liquidity":
             return _pack(
                 f"price sweeps UNDER {focus:.2f}",
-                f"then M5 CLOSES back ABOVE {focus:.2f}",
+                f"M5 CLOSES back ABOVE {focus:.2f}",
                 "consider LONG",
                 "do NOTHING until sweep + close-back-above happens",
                 cancel,
@@ -232,7 +232,7 @@ def _if_then(area: TradeArea, market_mid: float) -> tuple[str, list[str], str, s
     if kind == "sell_liquidity":
         return _pack(
             f"price sweeps ABOVE {focus:.2f}",
-            f"then M5 CLOSES back BELOW {focus:.2f}",
+            f"M5 CLOSES back BELOW {focus:.2f}",
             "consider SHORT",
             "do NOTHING until sweep + close-back-below happens",
             cancel,
@@ -314,12 +314,15 @@ def build_manual_scan(
         if status == "AVOID_NOW":
             ift = "SKIP ENTRY (against H1). " + ift
 
+# Ensure zone_low <= zone_high when building cards from areas
+        lo = min(a.price_low, a.price_high)
+        hi = max(a.price_low, a.price_high)
         cards.append(
             SetupCard(
                 grade=grade,
                 side=a.side,
-                zone_low=a.price_low,
-                zone_high=a.price_high,
+                zone_low=lo,
+                zone_high=hi,
                 focus_price=a.mid_price,
                 kind=a.kind,
                 score=a.score,
@@ -427,31 +430,42 @@ def build_manual_scan(
 def render_manual_scan_block(
     report: ManualScanReport | None,
     mid: float = 0.0,
-    brief: bool = True,
+    brief: bool = False,
 ) -> list[str]:
-    """Compact trader view by default; brief=False shows more cards."""
+    """Full setup cards by default; brief=True for compact card."""
     lines: list[str] = []
-    lines.append("-" * 72)
-    lines.append("  SETUPS (short)")
+    lines.append("=" * 72)
+    lines.append("  MANUAL SETUPS  (YOU decide · YOU trade · NO auto)")
+    lines.append("=" * 72)
     if report is None:
-        lines.append("  No setups.")
+        lines.append("  No setups available.")
         return lines
 
-    lines.append(f"  Stance: {report.stance} (H1={report.bias}) | mid={mid:.2f}")
-    focus_line = next((w for w in report.watchlist if w.startswith("FOCUS NOW:")), None)
-    if focus_line:
-        lines.append(f"  {focus_line}")
+    lines.append(f"  Mid      : {mid:.3f}")
+    lines.append(f"  Stance   : {report.stance}  (H1={report.bias})")
+    lines.append(f"  Plan     : {report.headline}")
+    lines.append(f"  Snapshot : {report.summary}")
+
+    lines.append("-" * 72)
+    lines.append("  WATCHLIST")
+    for w in report.watchlist[:6]:
+        lines.append(f"    • {w}")
+
+    lines.append("-" * 72)
+    lines.append("  DO NOT")
+    for d in report.do_not[:5]:
+        lines.append(f"    • {d}")
 
     buy_n = 3 if brief else 5
     sell_n = 2 if brief else 5
-    # For long bias, hide sell details in brief (just danger note)
-    show_sells = True
     if brief and report.stance == "LONG_BIAS":
-        show_sells = False
-        lines.append("  Sells: SKIP (against H1) — use as resistance/targets only")
+        lines.append("-" * 72)
+        lines.append("  Sells: SKIP entries (against H1) — resistance/targets only")
+        sell_n = 0
     elif brief and report.stance == "SHORT_BIAS":
+        lines.append("-" * 72)
+        lines.append("  Buys: SKIP entries (against H1) — support/targets only")
         buy_n = 0
-        lines.append("  Buys: SKIP (against H1) — use as support/targets only")
 
     def _emit(title: str, cards: list[SetupCard], limit: int) -> None:
         lines.append("-" * 72)
@@ -460,24 +474,40 @@ def render_manual_scan_block(
             lines.append("    (none)")
             return
         for i, c in enumerate(cards[:limit], 1):
+            lo, hi = min(c.zone_low, c.zone_high), max(c.zone_low, c.zone_high)
             lines.append(
-                f"  {i}. [{c.grade}] {c.side} {c.zone_low:.2f}-{c.zone_high:.2f}  {c.status}"
+                f"  {i}. [{c.grade}] {c.side}  {lo:.2f}-{hi:.2f}  "
+                f"@{c.focus_price:.2f}  {c.kind}  score={c.score:.0f}  {c.status}"
             )
-            # Split WAIT|CONFIRM|THEN|NOW onto separate lines
             parts = [p.strip() for p in c.if_then.split("|")]
             for p in parts:
                 lines.append(f"      {p}")
             lines.append(f"      {c.invalidation}")
+            lines.append(f"      {c.avoid}")
+            if not brief:
+                for t in c.confirm_on_tv[:2]:
+                    lines.append(f"      TV · {t}")
+                for r in c.reasons[:2]:
+                    lines.append(f"      Why · {r}")
             if c.status == "AVOID_NOW":
-                lines.append("      >>> DO NOT ENTER THIS SIDE")
+                lines.append("      >>> DO NOT ENTER THIS SIDE (against H1 bias)")
 
     if buy_n:
-        _emit("BUY SETUPS", report.buy_cards, buy_n)
-    if show_sells:
-        _emit("SELL SETUPS", report.sell_cards, sell_n)
+        _emit(
+            "BEST BUY AREAS (support / buy liquidity / bull FVG-OB / OTE)",
+            report.buy_cards,
+            buy_n,
+        )
+    if sell_n:
+        _emit(
+            "BEST SELL AREAS (resistance / sell liquidity / bear FVG-OB / OTE)",
+            report.sell_cards,
+            sell_n,
+        )
 
     lines.append("-" * 72)
-    lines.append("  RULES: wait for WAIT → need CONFIRM → only then THEN | CANCEL kills idea")
+    lines.append("  RULES: WAIT first → then CONFIRM candle → only then THEN")
+    lines.append("         If CANCEL prints, drop the idea. Bot never sends orders.")
     return lines
 
 

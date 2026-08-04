@@ -213,7 +213,7 @@ def test_dashboard_renders():
                         "kind": "support",
                         "score": 90.0,
                         "status": "WAIT_FOR_TRIGGER",
-                        "if_then": "IF dip THEN long",
+                            "if_then": "WAIT: price dips INTO support | CONFIRM: M5 bullish pin | THEN: consider LONG | NOW: do NOTHING",
                         "confirm_on_tv": ["Mark support"],
                         "invalidation": "Below zone",
                         "avoid": "No chase",
@@ -234,9 +234,10 @@ def test_dashboard_renders():
         narrative=n,
     )
     text = render_dashboard(d)
-    assert "SHORT BRIEF" in text or "SETUPS (short)" in text
-    assert "WAIT:" in text or "FOCUS" in text
-    assert "no auto" in text.lower() or "YOU trade" in text or "you trade" in text.lower()
+    assert "MANUAL HIGH-PROBABILITY MARKET SCANNER" in text or "MANUAL SETUPS" in text
+    assert "WAIT:" in text
+    assert "MODULE SCORES" in text
+    assert "no auto" in text.lower() or "NO auto" in text
 
 
 def test_discount_array_playbook():
