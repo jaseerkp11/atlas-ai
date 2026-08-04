@@ -30,6 +30,7 @@ except ImportError:
 
 
 TF_TO_MT5 = {
+    "M1": 1,
     "M5": 5,
     "M15": 15,
     "H1": 16385,
@@ -40,12 +41,17 @@ TF_TO_MT5 = {
 def _tf_constant(name: str) -> int:
     if MT5_AVAILABLE and mt5 is not None:
         mapping = {
+            "M1": mt5.TIMEFRAME_M1,
             "M5": mt5.TIMEFRAME_M5,
             "M15": mt5.TIMEFRAME_M15,
             "H1": mt5.TIMEFRAME_H1,
             "H4": mt5.TIMEFRAME_H4,
         }
+        if name not in mapping:
+            raise KeyError(f"Unsupported timeframe {name!r}; supported: {sorted(mapping)}")
         return mapping[name]
+    if name not in TF_TO_MT5:
+        raise KeyError(f"Unsupported timeframe {name!r}; supported: {sorted(TF_TO_MT5)}")
     return TF_TO_MT5[name]
 
 
@@ -435,7 +441,7 @@ def generate_synthetic_ohlc(
     Not for performance claims — analysis plumbing only.
     """
     rng = np.random.default_rng(seed if seed is not None else abs(hash(symbol)) % (2**32))
-    minutes = {"M5": 5, "M15": 15, "H1": 60, "H4": 240}[timeframe.upper()]
+    minutes = {"M1": 1, "M5": 5, "M15": 15, "H1": 60, "H4": 240}[timeframe.upper()]
     end = pd.Timestamp.now(tz="UTC").floor(f"{minutes}min")
     times = pd.date_range(end=end, periods=bars, freq=f"{minutes}min", tz="UTC")
 
