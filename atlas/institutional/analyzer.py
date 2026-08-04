@@ -215,6 +215,21 @@ class InstitutionalAnalyzer:
         narrative.extras["trade_areas"] = trade_areas.as_dict()
         narrative.extras["trade_areas_summary"] = trade_areas.summary
 
+        from atlas.institutional.manual_scanner import build_manual_scan
+
+        manual = build_manual_scan(
+            narrative,
+            trade_areas,
+            playbooks,
+            h1_bias=h1_s.bias,
+            h4_bias=h4_s.bias,
+            m15_bias=m15_s.bias,
+            session_name=session.best_session,
+        )
+        narrative.extras["manual_scan"] = manual.as_dict()
+        narrative.extras["manual_scan_summary"] = manual.summary
+        narrative.extras["manual_stance"] = manual.stance
+
         # Stricter: H1 must match consensus when H1 has a bias
         if h1_s.bias != Bias.NEUTRAL:
             h1_aligned = h1_s.bias == confluence.consensus_bias

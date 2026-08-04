@@ -185,6 +185,7 @@ def test_dashboard_renders():
             "m15_bias": "BULLISH",
             "playbook": "playbooks=0",
             "playbook_hits": [],
+            "manual_stance": "LONG_BIAS",
             "scenario": {
                 "primary": "LONG bias wait",
                 "alternate": "flip",
@@ -194,37 +195,32 @@ def test_dashboard_renders():
                 "checklist": [{"name": "H1", "ok": True, "detail": "BULLISH"}],
                 "next_triggers": ["Wait for OTE"],
             },
-            "trade_areas": {
-                "summary": "areas=1 buy=1 sell=0",
-                "areas": [
+            "manual_scan": {
+                "bias": "BULLISH",
+                "stance": "LONG_BIAS",
+                "headline": "Prefer LONG ideas",
+                "summary": "stance=LONG_BIAS",
+                "watchlist": ["H1 bias = BULLISH"],
+                "do_not": ["Do NOT auto-trade"],
+                "cards": [],
+                "buy_cards": [
                     {
+                        "grade": "A",
                         "side": "BUY",
-                        "kind": "bullish_fvg",
-                        "price_low": 4048.0,
-                        "price_high": 4049.5,
-                        "mid_price": 4048.75,
-                        "score": 82.0,
-                        "distance_atr": 0.4,
-                        "fresh_unfilled": True,
-                        "reasons": ["Unfilled bullish FVG"],
-                        "label": "BullFVG",
+                        "zone_low": 4048.0,
+                        "zone_high": 4049.5,
+                        "focus_price": 4048.75,
+                        "kind": "support",
+                        "score": 90.0,
+                        "status": "WAIT_FOR_TRIGGER",
+                        "if_then": "IF dip THEN long",
+                        "confirm_on_tv": ["Mark support"],
+                        "invalidation": "Below zone",
+                        "avoid": "No chase",
+                        "reasons": ["Strong support"],
                     }
                 ],
-                "buy_best": [
-                    {
-                        "side": "BUY",
-                        "kind": "bullish_fvg",
-                        "price_low": 4048.0,
-                        "price_high": 4049.5,
-                        "mid_price": 4048.75,
-                        "score": 82.0,
-                        "distance_atr": 0.4,
-                        "fresh_unfilled": True,
-                        "reasons": ["Unfilled bullish FVG"],
-                        "label": "BullFVG",
-                    }
-                ],
-                "sell_best": [],
+                "sell_cards": [],
             },
         },
     )
@@ -238,13 +234,10 @@ def test_dashboard_renders():
         narrative=n,
     )
     text = render_dashboard(d)
-    assert "DECISION: NO_TRADE" in text
-    assert "INSTITUTIONAL" in text
-    assert "AI SCENARIO PLAN" in text
-    assert "HIGH-PROBABILITY PLAYBOOKS" in text
-    assert "BEST TRADE AREAS" in text
-    assert "BUY-SIDE AREAS" in text
-    assert text.index("DECISION: NO_TRADE") < text.index("BEST TRADE AREAS")
+    assert "MANUAL HIGH-PROBABILITY" in text
+    assert "IF/THEN" in text
+    assert "BEST BUY AREAS" in text
+    assert "NO auto" in text or "no auto" in text.lower()
 
 
 def test_discount_array_playbook():
@@ -348,3 +341,67 @@ def test_trade_areas_rank_fvg_and_liquidity():
     assert any(a.kind in ("bullish_fvg", "buy_liquidity") for a in rep.buy_best)
     assert "buy=" in rep.summary
 
+
+def test_manual_scanner_grades_and_if_then():
+    from atlas.institutional.manual_scanner import build_manual_scan
+    from atlas.institutional.models import MarketNarrative, utcnow
+    from atlas.institutional.trade_areas import TradeArea, TradeAreasReport
+
+    n = MarketNarrative(
+        symbol="XAUUSD",
+        as_of=utcnow(),
+        overall_bias=Bias.BULLISH,
+        htf_bias=Bias.BULLISH,
+        mtf_bias=Bias.BULLISH,
+        structure_summary="x",
+        liquidity_summary="x",
+        institutional_confluence="x",
+        sr_summary="x",
+        trend_quality="t",
+        volatility_regime="v",
+        best_session="London",
+        news_status="ok",
+        mid=4050.0,
+        atr_m15=5.0,
+    )
+    areas = TradeAreasReport(
+        areas=[],
+        buy_best=[],
+        sell_best=[],
+        summary="x",
+    )
+    areas.areas = [
+        TradeArea(
+            "BUY",
+            "buy_liquidity",
+            4048,
+            4050,
+            4049,
+            92,
+            0.3,
+            True,
+            ["Buy-side liquidity"],
+            "EQL",
+        ),
+        TradeArea(
+            "SELL",
+            "resistance",
+            4055,
+            4057,
+            4056,
+            90,
+            1.0,
+            True,
+            ["Resistance"],
+            "R",
+        ),
+    ]
+    rep = build_manual_scan(
+        n, areas, None, Bias.BULLISH, Bias.NEUTRAL, Bias.BULLISH, "London"
+    )
+    assert rep.stance == "LONG_BIAS"
+    assert rep.buy_cards
+    assert "IF" in rep.buy_cards[0].if_then and "THEN" in rep.buy_cards[0].if_then
+    assert rep.buy_cards[0].grade in ("A+", "A", "B")
+    # Against-H1 sell should be B / AVOID or lower priority
+    assert any(c.side == "SELL" for c in rep.sell_cards)

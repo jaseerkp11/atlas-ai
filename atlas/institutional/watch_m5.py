@@ -1,9 +1,7 @@
 """
-Institutional watch — full SMC analysis on every NEW closed M5 candle.
+Manual M5 scanner watch — full analysis on every NEW closed M5 candle.
 
-Same rules as scalp watch:
-  - Do not flood mid-candle
-  - Wait for next M5 boundary, then emit only when last closed M5 changes
+Analysis only. No auto trading. You confirm on TradingView and trade yourself.
 """
 
 from __future__ import annotations
@@ -17,7 +15,6 @@ from pathlib import Path
 from atlas.institutional.analyzer import InstitutionalAnalyzer
 from atlas.institutional.config import InstitutionalConfig, load_institutional_config
 from atlas.institutional.dashboard import render_dashboard
-from atlas.institutional.risk_manager import InstitutionalRiskManager
 from atlas.live.watch import _next_m5_boundary_utc, last_closed_m5_key
 
 logger = logging.getLogger(__name__)
@@ -29,22 +26,21 @@ def _journal_decision(cfg: InstitutionalConfig, m5_key: str, decision, text: str
         log_dir.mkdir(parents=True, exist_ok=True)
         day = datetime.now(timezone.utc).strftime("%Y%m%d")
         path = log_dir / f"m5_{day}.jsonl"
-        sc = (decision.narrative.extras.get("scenario") if decision.narrative else None) or {}
+        n = decision.narrative
         row = {
             "m5": m5_key,
             "as_of": datetime.now(timezone.utc).isoformat(),
-            "action": decision.action.value,
+            "setup_status": decision.action.value,
             "probability": decision.probability,
             "confidence": decision.confidence,
             "confluence": decision.confluence,
-            "edge": sc.get("edge_score"),
-            "playbook": (decision.narrative.extras.get("playbook") if decision.narrative else None),
-            "why": decision.why[:6],
+            "manual_stance": (n.extras.get("manual_stance") if n else None),
+            "manual_scan": (n.extras.get("manual_scan_summary") if n else None),
+            "playbook": (n.extras.get("playbook") if n else None),
         }
         with path.open("a", encoding="utf-8") as f:
             f.write(json.dumps(row, ensure_ascii=False) + "\n")
-        dash = log_dir / f"last_dashboard_{day}.txt"
-        dash.write_text(text, encoding="utf-8")
+        (log_dir / f"last_dashboard_{day}.txt").write_text(text, encoding="utf-8")
     except Exception as exc:
         logger.debug("journal skip: %s", exc)
 
@@ -56,26 +52,26 @@ class InstitutionalWatch:
         execute: bool = False,
     ) -> None:
         self.cfg = cfg or load_institutional_config()
-        self.execute = execute
+        # Manual scanner product: ignore execute arming
+        if execute:
+            print(
+                "NOTE: --execute ignored. This build is a MANUAL scanner only "
+                "(no auto orders). Confirm on TradingView and trade yourself."
+            )
         self.analyzer = InstitutionalAnalyzer(self.cfg)
-        self.risk = InstitutionalRiskManager(self.cfg)
 
     def start(self, max_cycles: int | None = None) -> None:
         print("=" * 72)
-        print("  ATLAS INSTITUTIONAL M5-CLOSE ANALYST")
-        print(f"  Symbol : {self.cfg.symbol} | Mode: {self.cfg.mode}")
-        print(
-            f"  Gates  : prob≥{self.cfg.min_probability} conf≥{self.cfg.min_confidence} "
-            f"confl≥{self.cfg.min_confluence} playbook={'ON' if self.cfg.require_playbook else 'OFF'}"
-        )
-        print("  Cycle  : full institutional analysis ONLY on each new closed M5")
-        print("  Style  : world SMC playbooks · AI checklist · prefer NO TRADE")
+        print("  ATLAS MANUAL HIGH-PROBABILITY M5 SCANNER")
+        print(f"  Symbol : {self.cfg.symbol} | Mode: {self.cfg.mode} (analysis only)")
+        print("  Output : S/R + graded BUY/SELL areas + IF/THEN triggers")
+        print("  Cycle  : full scan on each new closed M5")
+        print("  Trade  : YOU decide on TradingView — bot never sends orders")
         print("=" * 72)
 
         if not self.analyzer.connect():
             raise RuntimeError("MT5 connection failed")
 
-        # Wait for next M5 close — no mid-candle flood
         now = datetime.now(timezone.utc)
         nxt = _next_m5_boundary_utc(now)
         wait = max(0.0, (nxt - now).total_seconds())
@@ -85,7 +81,7 @@ class InstitutionalWatch:
 
         frames = self.analyzer.load_frames(self.cfg.symbol)
         prev = last_closed_m5_key(frames.get("M5"))
-        print(f"Seeded last closed M5={prev}. Watching…\n")
+        print(f"Seeded last closed M5={prev}. Scanning…\n")
 
         cycles = 0
         try:
@@ -98,33 +94,15 @@ class InstitutionalWatch:
 
                 prev = cur
                 cycles += 1
-                print(f"\n>>> NEW M5 CLOSE {cur} — institutional high-prob analysis #{cycles}")
+                print(f"\n>>> NEW M5 CLOSE {cur} — manual high-prob scan #{cycles}")
                 decision = self.analyzer.analyze(self.cfg.symbol, frames=frames)
                 text = render_dashboard(decision)
                 print(text)
                 _journal_decision(self.cfg, str(cur), decision, text)
 
-                if self.execute and decision.is_executable():
-                    eq = 10000.0
-                    try:
-                        info = self.analyzer.client.account_info_dict()
-                        eq = float(info.get("equity") or info.get("balance") or eq)
-                    except Exception:
-                        pass
-                    ok, why = self.risk.allows_trade(eq, 0)
-                    if not ok:
-                        print(f"RISK_BLOCK {why}")
-                    else:
-                        print(
-                            f"ARMED {decision.action.value} entry={decision.entry:.3f} "
-                            f"SL={decision.stop:.3f} TP={decision.take_profit:.3f} "
-                            f"(mode={self.cfg.mode})"
-                        )
-                        self.risk.register_trade()
-
                 if max_cycles is not None and cycles >= max_cycles:
                     break
         except KeyboardInterrupt:
-            print("\nInstitutional watch stopped by user")
+            print("\nManual scanner stopped by user")
         finally:
             self.analyzer.disconnect()

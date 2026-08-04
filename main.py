@@ -212,7 +212,7 @@ def cmd_tick_backtest(args: argparse.Namespace) -> int:
 
 
 def cmd_analyze(args: argparse.Namespace) -> int:
-    """Institutional SMC market narrative + decision (NO TRADE by default)."""
+    """Manual high-probability scanner (one-shot). No auto trade."""
     from atlas.institutional.analyzer import InstitutionalAnalyzer
     from atlas.institutional.config import load_institutional_config
     from atlas.institutional.dashboard import render_dashboard
@@ -232,14 +232,12 @@ def cmd_analyze(args: argparse.Namespace) -> int:
 
 
 def cmd_institutional(args: argparse.Namespace) -> int:
-    """
-    Institutional monitor on each NEW M5 close (high-probability playbooks).
-    """
+    """Manual scanner on each NEW M5 close — analysis only."""
     from atlas.institutional.config import load_institutional_config
     from atlas.institutional.watch_m5 import InstitutionalWatch
 
     cfg = load_institutional_config(reload=True)
-    watch = InstitutionalWatch(cfg, execute=args.execute)
+    watch = InstitutionalWatch(cfg, execute=bool(getattr(args, "execute", False)))
     try:
         watch.start(max_cycles=args.cycles)
     except RuntimeError as exc:
@@ -400,27 +398,26 @@ def build_parser() -> argparse.ArgumentParser:
 
     a = sub.add_parser(
         "analyze",
-        help="Institutional SMC narrative for XAUUSD (quality gates → NO TRADE by default)",
+        help="Manual high-prob scanner (one-shot): S/R, BUY/SELL areas, IF/THEN — no auto trade",
     )
     a.add_argument("--symbol", default=None, help="Override symbol (default XAUUSD)")
     a.set_defaults(func=cmd_analyze)
 
     inst = sub.add_parser(
         "institutional",
-        help="Institutional SMC analysis on each NEW M5 close (high-probability playbooks)",
+        help="Manual high-prob M5 scanner (each new M5 close) — analysis only, no auto trade",
     )
     inst.add_argument(
         "--cycles",
         type=int,
         default=None,
-        help="Stop after N closed-M5 analyses",
+        help="Stop after N closed-M5 scans",
     )
     inst.add_argument(
         "--execute",
         action="store_true",
-        help="Arm execution when BUY/SELL clears all institutional gates",
+        help=argparse.SUPPRESS,  # ignored — manual scanner only
     )
-    # keep --poll for backward compat (ignored; M5-close driven)
     inst.add_argument("--poll", type=float, default=60.0, help=argparse.SUPPRESS)
     inst.set_defaults(func=cmd_institutional)
 

@@ -1,16 +1,33 @@
-"""Terminal institutional dashboard — narrative + high-probability checklist."""
+"""Terminal dashboard — manual high-probability scanner (no auto trade)."""
 
 from __future__ import annotations
 
-from atlas.institutional.models import InstitutionalDecision
+from atlas.institutional.models import DecisionAction, InstitutionalDecision
+
+
+def _setup_status(decision: InstitutionalDecision) -> str:
+    """Reframe engine action as manual setup status."""
+    ms = ""
+    if decision.narrative:
+        ms = str(decision.narrative.extras.get("manual_stance") or "")
+    if decision.action == DecisionAction.WAIT:
+        return "SETUP FORMING — wait for IF/THEN trigger on TradingView"
+    if decision.action == DecisionAction.NO_TRADE:
+        return "STAND ASIDE — map levels only; no A+ trigger ready"
+    if decision.action in (DecisionAction.BUY, DecisionAction.SELL):
+        return (
+            f"ZONE ALIGNED ({decision.action.value}) — still confirm IF/THEN on TradingView "
+            f"(manual only; bot does not send orders)"
+        )
+    return f"STATUS={decision.action.value} stance={ms}"
 
 
 def render_dashboard(decision: InstitutionalDecision) -> str:
     n = decision.narrative
     lines: list[str] = []
     lines.append("=" * 72)
-    lines.append("  ATLAS INSTITUTIONAL MARKET ANALYSIS ENGINE")
-    lines.append("  High-probability SMC · quality over quantity · prefer NO TRADE")
+    lines.append("  ATLAS MANUAL HIGH-PROBABILITY MARKET SCANNER")
+    lines.append("  AI analysis for YOUR TradingView decisions · NO auto trading")
     lines.append("=" * 72)
     if n:
         lines.append(f"  Symbol        : {n.symbol}")
@@ -40,7 +57,7 @@ def render_dashboard(decision: InstitutionalDecision) -> str:
             )
         if n.zones:
             lines.append("-" * 72)
-            lines.append("  KEY ZONES (top)")
+            lines.append("  KEY S/R + IMBALANCE ZONES")
             for z in sorted(n.zones, key=lambda x: -x.score)[:8]:
                 lines.append(
                     f"    {z.strength.value:12} {z.kind:14} "
@@ -56,9 +73,8 @@ def render_dashboard(decision: InstitutionalDecision) -> str:
                     f"{lv.classification:18} ({lv.timeframe}) score={lv.score:.0f}"
                 )
 
-        # High-probability playbooks
         lines.append("-" * 72)
-        lines.append("  HIGH-PROBABILITY PLAYBOOKS")
+        lines.append("  HIGH-PROBABILITY PLAYBOOK THEMES")
         hits = n.extras.get("playbook_hits") or []
         if hits:
             for h in hits:
@@ -66,48 +82,51 @@ def render_dashboard(decision: InstitutionalDecision) -> str:
                     f"    • {h['name']:32} {h['bias']:8}  boost=+{h['boost']:.0f}"
                 )
         else:
-            lines.append("    (none active — stand aside)")
+            lines.append("    (none — wait for sweep / OTE / FVG / structure)")
         if n.extras.get("playbook"):
             lines.append(f"  Stack: {n.extras.get('playbook')}")
 
-        # Scenario / checklist
         sc = n.extras.get("scenario") or {}
         if sc:
             lines.append("-" * 72)
-            lines.append("  AI SCENARIO PLAN")
+            lines.append("  AI CONTEXT")
             lines.append(f"  Primary      : {sc.get('primary', '')}")
             lines.append(f"  Alternate    : {sc.get('alternate', '')}")
             lines.append(f"  Invalidation : {sc.get('invalidation', '')}")
-            lines.append(f"  Edge score   : {sc.get('edge_score', 0):.0f}/100  ({sc.get('summary', '')})")
-            lines.append("  Checklist:")
-            for c in sc.get("checklist", []):
-                mark = "OK" if c.get("ok") else "--"
-                lines.append(f"    [{mark}] {c.get('name')}: {c.get('detail')}")
             triggers = sc.get("next_triggers") or n.extras.get("unlock") or []
             if triggers:
-                lines.append("  Next triggers:")
+                lines.append("  Market still needs:")
                 for t in triggers[:5]:
                     lines.append(f"    → {t}")
-        elif n.extras.get("unlock"):
-            lines.append("  Unlock path:")
-            for h in n.extras["unlock"][:5]:
-                lines.append(f"    → {h}")
 
     lines.append("-" * 72)
-    lines.append(decision.summary())
+    lines.append(f"  SETUP STATUS  : {_setup_status(decision)}")
+    lines.append(
+        f"  Edge readout  : prob={decision.probability:.1f}% conf={decision.confidence:.1f}% "
+        f"confl={decision.confluence:.1f} risk={decision.risk_level.value}"
+    )
+    lines.append("  (Status is guidance only — you confirm and trade manually)")
 
-    # LAST block — Best Trade Areas for personal TradingView chart check
-    from atlas.institutional.trade_areas import TradeAreasReport, render_trade_areas_block
+    # Primary deliverable: graded manual scanner with IF/THEN
+    from atlas.institutional.manual_scanner import ManualScanReport, SetupCard, render_manual_scan_block
 
-    ta_raw = (n.extras.get("trade_areas") if n else None) or {}
-    ta = None
-    if ta_raw:
-        from atlas.institutional.trade_areas import TradeArea
+    raw = (n.extras.get("manual_scan") if n else None) or {}
+    report = None
+    if raw:
+        def _card(d: dict) -> SetupCard:
+            return SetupCard(**d)
 
-        areas = [TradeArea(**a) for a in ta_raw.get("areas", [])]
-        buy = [TradeArea(**a) for a in ta_raw.get("buy_best", [])]
-        sell = [TradeArea(**a) for a in ta_raw.get("sell_best", [])]
-        ta = TradeAreasReport(areas, buy, sell, ta_raw.get("summary", ""))
-    lines.extend(render_trade_areas_block(ta, mid=n.mid if n else 0.0))
+        report = ManualScanReport(
+            bias=str(raw.get("bias", "")),
+            stance=str(raw.get("stance", "")),
+            headline=str(raw.get("headline", "")),
+            cards=[_card(c) for c in raw.get("cards", [])],
+            buy_cards=[_card(c) for c in raw.get("buy_cards", [])],
+            sell_cards=[_card(c) for c in raw.get("sell_cards", [])],
+            watchlist=list(raw.get("watchlist") or []),
+            do_not=list(raw.get("do_not") or []),
+            summary=str(raw.get("summary", "")),
+        )
+    lines.extend(render_manual_scan_block(report, mid=n.mid if n else 0.0))
     lines.append("=" * 72)
     return "\n".join(lines)

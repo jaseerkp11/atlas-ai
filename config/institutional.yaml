@@ -1,24 +1,22 @@
-# ATLAS Institutional Market Analysis Engine — XAUUSD primary
-# Quality over quantity. Prefer NO TRADE unless confluence clears the gate.
+# ATLAS Manual High-Probability Market Scanner — XAUUSD primary
+# Analysis only. You confirm on TradingView and trade yourself. No auto orders.
 
-mode: PAPER  # PAPER | LIVE via ATLAS_MODE
+mode: PAPER  # PAPER | LIVE via ATLAS_MODE (LIVE ignored for scanner orders)
 
 institutional:
   symbol: XAUUSD
   magic: 26080501
 
-  # Multi-timeframe stack (M1 = entry timing only)
+  # Multi-timeframe stack (M1 = timing context only)
   timeframes: [H4, H1, M15, M5, M1]
 
-  # Decision gates — quality over quantity
+  # Quality gates for setup status readout (not auto-entry)
   min_probability: 70.0
   min_confidence: 62.0
   min_confluence: 65.0
   min_reward_risk: 2.5
-  # H1 is primary HTF for XAUUSD; H4 soft (transitional OK if H1 aligns)
   require_htf_alignment: true
   require_m1_timing: true
-  # Require a world-SMC playbook hit before BUY/SELL (analyze still always prints full narrative)
   require_playbook: true
 
   # Confluence weights (sum ≈ 100)
@@ -52,8 +50,6 @@ institutional:
     enabled: true
     block_minutes_before_high: 30
     block_minutes_after_high: 30
-    # Uses public ForexFactory-style calendar fetch when network allows;
-    # falls back to session heuristic if unavailable.
 
   analysis:
     swing_lookback: 3
