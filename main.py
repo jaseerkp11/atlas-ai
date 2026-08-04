@@ -225,7 +225,7 @@ def cmd_analyze(args: argparse.Namespace) -> int:
         return 1
     try:
         decision = analyzer.analyze(symbol)
-        print(render_dashboard(decision))
+        print(render_dashboard(decision, full=bool(getattr(args, "full", False))))
     finally:
         analyzer.disconnect()
     return 0
@@ -398,9 +398,14 @@ def build_parser() -> argparse.ArgumentParser:
 
     a = sub.add_parser(
         "analyze",
-        help="Manual high-prob scanner (one-shot): S/R, BUY/SELL areas, IF/THEN — no auto trade",
+        help="Manual high-prob scanner (short brief). Add --full for details",
     )
     a.add_argument("--symbol", default=None, help="Override symbol (default XAUUSD)")
+    a.add_argument(
+        "--full",
+        action="store_true",
+        help="Show full module/fib/playbook dump (default is short brief)",
+    )
     a.set_defaults(func=cmd_analyze)
 
     inst = sub.add_parser(

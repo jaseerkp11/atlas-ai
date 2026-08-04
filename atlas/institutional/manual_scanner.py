@@ -131,120 +131,143 @@ def _grade(
 
 
 def _if_then(area: TradeArea, market_mid: float) -> tuple[str, list[str], str, str]:
+    """
+    Plain-English plan that is hard to misunderstand.
+    Format: WAIT | CONFIRM | THEN | NOW
+    """
     lo, hi, focus = area.price_low, area.price_high, area.mid_price
     kind = area.kind
+
+    def _pack(wait: str, confirm: str, then: str, now: str, cancel: str, avoid: str, tips: list[str]):
+        ift = f"WAIT: {wait} | CONFIRM: {confirm} | THEN: {then} | NOW: {now}"
+        return ift, tips, f"CANCEL if: {cancel}", f"AVOID: {avoid}"
+
     if area.side == "BUY":
-        inv = f"Invalidate long idea if M5 closes below {lo - (hi - lo) * 0.35:.2f} and holds"
-        avoid = f"Do not chase longs mid-air — only act at {lo:.2f}-{hi:.2f} with confirmation"
+        cancel = f"M5 closes below {lo - (hi - lo) * 0.35:.2f} and holds"
+        avoid = "buying in the middle — only at the zone after confirmation"
         above = lo > market_mid
         if above and kind == "buy_liquidity":
-            ift = (
-                f"Price is already below {focus:.2f}. IF it reclaims back above {focus:.2f} "
-                f"on M5 close (after the liquidity run) THEN look LONG continuation"
+            return _pack(
+                f"price reclaims back above {focus:.2f}",
+                f"M5 CLOSES above {focus:.2f} (wick alone is not enough)",
+                "consider LONG",
+                f"do NOTHING now (price {market_mid:.2f} is still below the zone)",
+                cancel,
+                avoid,
+                ["RECLAIM plan — not a dip-buy"],
             )
-            conf = [
-                f"Mark {focus:.2f} as reclaimed liquidity line",
-                "Need M5 close back above the level — not just a wick",
-                "If it keeps making lower lows, abandon reclaim idea",
-            ]
-        elif above:
-            ift = (
-                f"Zone is above mid ({market_mid:.2f}). IF price rallies into {lo:.2f}-{hi:.2f} "
-                f"and holds as support (flip) THEN look LONG — else ignore for now"
+        if above:
+            return _pack(
+                f"price reaches box {lo:.2f}-{hi:.2f}",
+                "M5 holds/rejects upward inside the box",
+                "consider LONG",
+                f"do NOTHING now (zone is ABOVE market {market_mid:.2f})",
+                cancel,
+                avoid,
+                ["Wait until price is inside the box"],
             )
-            conf = [
-                "This is not a dip-buy yet — wait for price to reach the zone",
-                "Prefer reaction as support after reclaim",
-            ]
-        elif kind == "buy_liquidity":
-            ift = (
-                f"IF price sweeps below {focus:.2f} (buy-side liquidity) THEN reclaim back above "
-                f"{focus:.2f} on M5 close → look LONG"
+        if kind == "buy_liquidity":
+            return _pack(
+                f"price sweeps UNDER {focus:.2f}",
+                f"then M5 CLOSES back ABOVE {focus:.2f}",
+                "consider LONG",
+                "do NOTHING until sweep + close-back-above happens",
+                cancel,
+                avoid,
+                ["Order: 1) sweep  2) reclaim close  3) you decide"],
             )
-            conf = [
-                "Mark equal lows / liquidity pool on TradingView",
-                "Wait for wick below then CLOSE back above the level",
-                "Prefer bullish pin / engulf on M5 after reclaim",
-            ]
-        elif kind in ("bullish_fvg", "bullish_ob"):
-            ift = (
-                f"IF price revisits unfilled {kind} {lo:.2f}-{hi:.2f} THEN holds / rejects higher "
-                f"on M5 → look LONG"
+        if kind in ("bullish_fvg", "bullish_ob"):
+            return _pack(
+                f"price taps {kind} box {lo:.2f}-{hi:.2f}",
+                "M5 bullish pin or engulf from the box",
+                "consider LONG",
+                "do NOTHING until tap + bullish M5",
+                cancel,
+                avoid,
+                [f"Draw box {lo:.2f}-{hi:.2f}"],
             )
-            conf = [
-                f"Draw {kind} box {lo:.2f}-{hi:.2f}",
-                "Wait for touch + bullish reaction candle",
-                "No entry on first touch without reaction",
-            ]
-        elif kind == "fib_ote":
-            ift = (
-                f"IF pullback reaches OTE {lo:.2f}-{hi:.2f} THEN bullish M5 confirmation → look LONG"
+        if kind == "fib_ote":
+            return _pack(
+                f"pullback reaches OTE {lo:.2f}-{hi:.2f}",
+                "M5 bullish confirmation candle",
+                "consider LONG",
+                "do NOTHING until OTE is tagged",
+                cancel,
+                avoid,
+                ["Fib 61.8-78.6"],
             )
-            conf = [
-                "Plot Fib swing; focus 61.8–78.6",
-                "Need displacement prior + reaction in pocket",
-            ]
-        else:
-            ift = (
-                f"IF price dips into support {lo:.2f}-{hi:.2f} THEN bullish M5 pin/engulf → look LONG"
-            )
-            conf = [
-                f"Horizontal support {lo:.2f}-{hi:.2f}",
-                "Wait for rejection wick + close back up",
-            ]
-        return ift, conf, inv, avoid
+        return _pack(
+            f"price dips INTO support {lo:.2f}-{hi:.2f}",
+            "M5 bullish pin or engulf from support",
+            "consider LONG",
+            f"do NOTHING unless price is inside {lo:.2f}-{hi:.2f}",
+            cancel,
+            avoid,
+            [f"Mark support {lo:.2f}-{hi:.2f}"],
+        )
 
-    inv = f"Invalidate short idea if M5 closes above {hi + (hi - lo) * 0.35:.2f} and holds"
-    avoid = f"Do not chase shorts mid-air — only act at {lo:.2f}-{hi:.2f} with confirmation"
+    cancel = f"M5 closes above {hi + (hi - lo) * 0.35:.2f} and holds"
+    avoid = "selling in the middle — only at the zone after confirmation"
     below = hi < market_mid
     if below and kind == "sell_liquidity":
-        ift = (
-            f"Price is already above {focus:.2f}. IF it rejects back below {focus:.2f} "
-            f"on M5 close THEN look SHORT continuation"
+        return _pack(
+            f"price rejects back below {focus:.2f}",
+            f"M5 CLOSES below {focus:.2f}",
+            "consider SHORT",
+            f"do NOTHING now (price {market_mid:.2f} is still above the zone)",
+            cancel,
+            avoid,
+            ["REJECT plan — wait for close back below"],
         )
-        conf = [
-            f"Mark {focus:.2f} as rejected liquidity line",
-            "Need M5 close back below — not just a wick",
-        ]
-    elif below:
-        ift = (
-            f"Zone is below mid ({market_mid:.2f}). IF price falls into {lo:.2f}-{hi:.2f} "
-            f"and rejects as resistance (flip) THEN look SHORT — else ignore for now"
+    if below:
+        return _pack(
+            f"price falls into box {lo:.2f}-{hi:.2f}",
+            "M5 rejects downward inside the box",
+            "consider SHORT",
+            f"do NOTHING now (zone is BELOW market {market_mid:.2f})",
+            cancel,
+            avoid,
+            ["Wait until price is inside the box"],
         )
-        conf = ["Not a fade yet — wait for price to reach the zone"]
-    elif kind == "sell_liquidity":
-        ift = (
-            f"IF price sweeps above {focus:.2f} (sell-side liquidity) THEN rejects back below "
-            f"{focus:.2f} on M5 close → look SHORT"
+    if kind == "sell_liquidity":
+        return _pack(
+            f"price sweeps ABOVE {focus:.2f}",
+            f"then M5 CLOSES back BELOW {focus:.2f}",
+            "consider SHORT",
+            "do NOTHING until sweep + close-back-below happens",
+            cancel,
+            avoid,
+            ["Order: 1) sweep  2) reject close  3) you decide"],
         )
-        conf = [
-            "Mark equal highs / liquidity pool",
-            "Wait for wick above then CLOSE back below",
-            "Prefer bearish pin / engulf on M5 after reject",
-        ]
-    elif kind in ("bearish_fvg", "bearish_ob"):
-        ift = (
-            f"IF price revisits unfilled {kind} {lo:.2f}-{hi:.2f} THEN holds / rejects lower "
-            f"on M5 → look SHORT"
+    if kind in ("bearish_fvg", "bearish_ob"):
+        return _pack(
+            f"price taps {kind} box {lo:.2f}-{hi:.2f}",
+            "M5 bearish pin or engulf from the box",
+            "consider SHORT",
+            "do NOTHING until tap + bearish M5",
+            cancel,
+            avoid,
+            [f"Draw box {lo:.2f}-{hi:.2f}"],
         )
-        conf = [
-            f"Draw {kind} box {lo:.2f}-{hi:.2f}",
-            "Wait for touch + bearish reaction candle",
-        ]
-    elif kind == "fib_ote":
-        ift = (
-            f"IF rally reaches OTE {lo:.2f}-{hi:.2f} THEN bearish M5 confirmation → look SHORT"
+    if kind == "fib_ote":
+        return _pack(
+            f"rally reaches OTE {lo:.2f}-{hi:.2f}",
+            "M5 bearish confirmation candle",
+            "consider SHORT",
+            "do NOTHING until OTE is tagged",
+            cancel,
+            avoid,
+            ["Fib 61.8-78.6"],
         )
-        conf = ["Plot Fib; focus 61.8–78.6 premium", "Need reaction, not blind fade"]
-    else:
-        ift = (
-            f"IF price rallies into resistance {lo:.2f}-{hi:.2f} THEN bearish M5 pin/engulf → look SHORT"
-        )
-        conf = [
-            f"Horizontal resistance {lo:.2f}-{hi:.2f}",
-            "Wait for rejection wick + close back down",
-        ]
-    return ift, conf, inv, avoid
+    return _pack(
+        f"price rallies INTO resistance {lo:.2f}-{hi:.2f}",
+        "M5 bearish pin or engulf from resistance",
+        "consider SHORT",
+        f"do NOTHING unless price is inside {lo:.2f}-{hi:.2f}",
+        cancel,
+        avoid,
+        [f"Mark resistance {lo:.2f}-{hi:.2f}"],
+    )
 
 
 def build_manual_scan(
@@ -289,7 +312,7 @@ def build_manual_scan(
                 reasons.append(f"Supports playbook: {playbooks.best.name}")
 
         if status == "AVOID_NOW":
-            ift = "AGAINST H1 bias — skip unless H1 flips. " + ift
+            ift = "SKIP ENTRY (against H1). " + ift
 
         cards.append(
             SetupCard(
@@ -401,56 +424,60 @@ def build_manual_scan(
     )
 
 
-def render_manual_scan_block(report: ManualScanReport | None, mid: float = 0.0) -> list[str]:
+def render_manual_scan_block(
+    report: ManualScanReport | None,
+    mid: float = 0.0,
+    brief: bool = True,
+) -> list[str]:
+    """Compact trader view by default; brief=False shows more cards."""
     lines: list[str] = []
-    lines.append("=" * 72)
-    lines.append("  MANUAL HIGH-PROBABILITY SCANNER  (YOU decide · YOU trade · NO auto)")
-    lines.append("  Grades = setup quality for TradingView confirmation — not a win-rate promise")
-    lines.append("=" * 72)
+    lines.append("-" * 72)
+    lines.append("  SETUPS (short)")
     if report is None:
-        lines.append("  No scan available.")
+        lines.append("  No setups.")
         return lines
 
-    lines.append(f"  Mid           : {mid:.3f}")
-    lines.append(f"  Stance        : {report.stance}  (H1={report.bias})")
-    lines.append(f"  Plan          : {report.headline}")
-    lines.append(f"  Snapshot      : {report.summary}")
-    lines.append("-" * 72)
-    lines.append("  WATCHLIST")
-    for w in report.watchlist:
-        lines.append(f"    • {w}")
-    lines.append("-" * 72)
-    lines.append("  DO NOT")
-    for d in report.do_not:
-        lines.append(f"    • {d}")
+    lines.append(f"  Stance: {report.stance} (H1={report.bias}) | mid={mid:.2f}")
+    focus_line = next((w for w in report.watchlist if w.startswith("FOCUS NOW:")), None)
+    if focus_line:
+        lines.append(f"  {focus_line}")
 
-    def _emit(title: str, cards: list[SetupCard]) -> None:
+    buy_n = 3 if brief else 5
+    sell_n = 2 if brief else 5
+    # For long bias, hide sell details in brief (just danger note)
+    show_sells = True
+    if brief and report.stance == "LONG_BIAS":
+        show_sells = False
+        lines.append("  Sells: SKIP (against H1) — use as resistance/targets only")
+    elif brief and report.stance == "SHORT_BIAS":
+        buy_n = 0
+        lines.append("  Buys: SKIP (against H1) — use as support/targets only")
+
+    def _emit(title: str, cards: list[SetupCard], limit: int) -> None:
         lines.append("-" * 72)
         lines.append(f"  {title}")
-        if not cards:
-            lines.append("     (none)")
+        if not cards or limit <= 0:
+            lines.append("    (none)")
             return
-        for i, c in enumerate(cards, 1):
+        for i, c in enumerate(cards[:limit], 1):
             lines.append(
-                f"  {i}. [{c.grade}] {c.side}  {c.zone_low:.2f}-{c.zone_high:.2f}  "
-                f"@{c.focus_price:.2f}  {c.kind}  score={c.score:.0f}  {c.status}"
+                f"  {i}. [{c.grade}] {c.side} {c.zone_low:.2f}-{c.zone_high:.2f}  {c.status}"
             )
-            lines.append(f"      IF/THEN : {c.if_then}")
-            lines.append(f"      Invalid : {c.invalidation}")
-            lines.append(f"      Avoid   : {c.avoid}")
-            for t in c.confirm_on_tv[:3]:
-                lines.append(f"      TV      · {t}")
-            for r in c.reasons[:2]:
-                lines.append(f"      Why     · {r}")
+            # Split WAIT|CONFIRM|THEN|NOW onto separate lines
+            parts = [p.strip() for p in c.if_then.split("|")]
+            for p in parts:
+                lines.append(f"      {p}")
+            lines.append(f"      {c.invalidation}")
+            if c.status == "AVOID_NOW":
+                lines.append("      >>> DO NOT ENTER THIS SIDE")
 
-    _emit("BEST BUY AREAS  (long interest / buy liquidity / bull FVG-OB / support / OTE)", report.buy_cards)
-    _emit("BEST SELL AREAS (short interest / sell liquidity / bear FVG-OB / resistance / OTE)", report.sell_cards)
+    if buy_n:
+        _emit("BUY SETUPS", report.buy_cards, buy_n)
+    if show_sells:
+        _emit("SELL SETUPS", report.sell_cards, sell_n)
 
     lines.append("-" * 72)
-    lines.append("  HOW TO USE ON TRADINGVIEW")
-    lines.append("    1) Draw only A+ and A zones first")
-    lines.append("    2) Wait for the IF condition (sweep/tap) — do nothing before that")
-    lines.append("    3) Enter only after THEN confirmation candle on M5")
-    lines.append("    4) Honor invalidation — if hit, cancel the idea")
-    lines.append("    5) Trade yourself — this scanner never sends orders")
+    lines.append("  RULES: wait for WAIT → need CONFIRM → only then THEN | CANCEL kills idea")
     return lines
+
+

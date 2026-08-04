@@ -234,10 +234,9 @@ def test_dashboard_renders():
         narrative=n,
     )
     text = render_dashboard(d)
-    assert "MANUAL HIGH-PROBABILITY" in text
-    assert "IF/THEN" in text
-    assert "BEST BUY AREAS" in text
-    assert "NO auto" in text or "no auto" in text.lower()
+    assert "SHORT BRIEF" in text or "SETUPS (short)" in text
+    assert "WAIT:" in text or "FOCUS" in text
+    assert "no auto" in text.lower() or "YOU trade" in text or "you trade" in text.lower()
 
 
 def test_discount_array_playbook():
@@ -401,7 +400,6 @@ def test_manual_scanner_grades_and_if_then():
     )
     assert rep.stance == "LONG_BIAS"
     assert rep.buy_cards
-    assert "IF" in rep.buy_cards[0].if_then and "THEN" in rep.buy_cards[0].if_then
+    assert "WAIT:" in rep.buy_cards[0].if_then and "THEN:" in rep.buy_cards[0].if_then
     assert rep.buy_cards[0].grade in ("A+", "A", "B")
-    # Against-H1 sell should be B / AVOID or lower priority
     assert any(c.side == "SELL" for c in rep.sell_cards)
