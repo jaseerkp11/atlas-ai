@@ -95,5 +95,19 @@ def render_dashboard(decision: InstitutionalDecision) -> str:
 
     lines.append("-" * 72)
     lines.append(decision.summary())
+
+    # LAST block — Best Trade Areas for personal TradingView chart check
+    from atlas.institutional.trade_areas import TradeAreasReport, render_trade_areas_block
+
+    ta_raw = (n.extras.get("trade_areas") if n else None) or {}
+    ta = None
+    if ta_raw:
+        from atlas.institutional.trade_areas import TradeArea
+
+        areas = [TradeArea(**a) for a in ta_raw.get("areas", [])]
+        buy = [TradeArea(**a) for a in ta_raw.get("buy_best", [])]
+        sell = [TradeArea(**a) for a in ta_raw.get("sell_best", [])]
+        ta = TradeAreasReport(areas, buy, sell, ta_raw.get("summary", ""))
+    lines.extend(render_trade_areas_block(ta, mid=n.mid if n else 0.0))
     lines.append("=" * 72)
     return "\n".join(lines)

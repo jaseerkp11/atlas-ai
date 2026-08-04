@@ -207,6 +207,14 @@ class InstitutionalAnalyzer:
             },
         )
 
+        from atlas.institutional.trade_areas import build_trade_areas
+
+        trade_areas = build_trade_areas(
+            narrative, liquidity=liq, h1_bias=h1_s.bias, max_per_side=5
+        )
+        narrative.extras["trade_areas"] = trade_areas.as_dict()
+        narrative.extras["trade_areas_summary"] = trade_areas.summary
+
         # Stricter: H1 must match consensus when H1 has a bias
         if h1_s.bias != Bias.NEUTRAL:
             h1_aligned = h1_s.bias == confluence.consensus_bias

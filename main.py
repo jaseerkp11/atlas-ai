@@ -256,6 +256,7 @@ def cmd_institutional_backtest(args: argparse.Namespace) -> int:
     cfg = load_institutional_config(reload=True)
     client = MT5Client()
     client.connect()
+    src = "MT5_LIVE" if client.using_live_market_data else "SYNTHETIC_SAMPLE"
     frames = {
         "H4": client.copy_rates(cfg.symbol, "H4", 300),
         "H1": client.copy_rates(cfg.symbol, "H1", 500),
@@ -268,18 +269,10 @@ def cmd_institutional_backtest(args: argparse.Namespace) -> int:
         frames,
         step=args.step,
         on_log=print if not args.quiet else (lambda m: None),
+        data_source=src,
     )
-    print("=" * 60)
-    print("INSTITUTIONAL BACKTEST (sample — not a live performance claim)")
-    print("=" * 60)
-    print(f"bars_scanned : {result.bars}")
-    print(f"signals      : {result.signals}")
-    print(f"no_trade     : {result.no_trade}")
-    print(f"trades       : {len(result.trades)}")
-    print(f"win_rate     : {result.win_rate}%")
-    print(f"profit_factor: {result.profit_factor}")
-    print(f"expectancy_R : {result.expectancy}")
-    print(f"max_DD_R     : {result.max_dd_r}")
+    for line in result.summary_lines():
+        print(line)
     return 0
 
 
