@@ -211,6 +211,125 @@ def cmd_tick_backtest(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_analyze(args: argparse.Namespace) -> int:
+    """Institutional SMC market narrative + decision (NO TRADE by default)."""
+    from atlas.institutional.analyzer import InstitutionalAnalyzer
+    from atlas.institutional.config import load_institutional_config
+    from atlas.institutional.dashboard import render_dashboard
+
+    cfg = load_institutional_config(reload=True)
+    symbol = args.symbol or cfg.symbol
+    analyzer = InstitutionalAnalyzer(cfg)
+    if not analyzer.connect():
+        print("ERROR: MT5 connection failed")
+        return 1
+    try:
+        decision = analyzer.analyze(symbol)
+        print(render_dashboard(decision))
+    finally:
+        analyzer.disconnect()
+    return 0
+
+
+def cmd_institutional(args: argparse.Namespace) -> int:
+    """
+    Continuous institutional monitor — re-analyzes on interval.
+    Optional --execute only when decision is BUY/SELL and risk allows.
+    """
+    import time
+
+    from atlas.institutional.analyzer import InstitutionalAnalyzer
+    from atlas.institutional.config import load_institutional_config
+    from atlas.institutional.dashboard import render_dashboard
+    from atlas.institutional.models import DecisionAction
+    from atlas.institutional.risk_manager import InstitutionalRiskManager
+
+    cfg = load_institutional_config(reload=True)
+    analyzer = InstitutionalAnalyzer(cfg)
+    risk = InstitutionalRiskManager(cfg)
+    if not analyzer.connect():
+        print("ERROR: MT5 connection failed")
+        return 1
+
+    print("Institutional monitor started. Ctrl+C to stop.")
+    print(f"Gates: prob≥{cfg.min_probability} conf≥{cfg.min_confidence} conf≥{cfg.min_confluence}")
+    cycles = 0
+    try:
+        while True:
+            decision = analyzer.analyze(cfg.symbol)
+            print(render_dashboard(decision))
+            if args.execute and decision.is_executable():
+                eq = 10000.0
+                try:
+                    info = analyzer.client.account_info_dict()
+                    eq = float(info.get("equity") or info.get("balance") or eq)
+                except Exception:
+                    pass
+                ok, why = risk.allows_trade(eq, open_positions=0)
+                if not ok:
+                    print(f"RISK_BLOCK {why}")
+                else:
+                    print(
+                        f"EXECUTE ARMED {decision.action.value} @ {decision.entry:.3f} "
+                        f"(mode={cfg.mode}) — wire to execution engine / confirm manually first"
+                    )
+                    # Prefer existing scalp execution path only when LIVE and user insisted.
+                    if cfg.is_live:
+                        from atlas.execution.engine import ExecutionEngine
+                        from atlas.models import Direction, SetupFeatures
+
+                        # Soft bridge: log intent; full order send uses ExecutionEngine if available
+                        print(
+                            "LIVE note: institutional execute bridge logs intent. "
+                            "Confirm levels on chart before size-up."
+                        )
+                    risk.register_trade()
+            cycles += 1
+            if args.cycles and cycles >= args.cycles:
+                break
+            time.sleep(max(5.0, args.poll))
+    except KeyboardInterrupt:
+        print("\nStopped by user")
+    finally:
+        analyzer.disconnect()
+    return 0
+
+
+def cmd_institutional_backtest(args: argparse.Namespace) -> int:
+    from atlas.execution.mt5_client import MT5Client
+    from atlas.institutional.backtest_engine import run_institutional_backtest
+    from atlas.institutional.config import load_institutional_config
+
+    cfg = load_institutional_config(reload=True)
+    client = MT5Client()
+    client.connect()
+    frames = {
+        "H4": client.copy_rates(cfg.symbol, "H4", 300),
+        "H1": client.copy_rates(cfg.symbol, "H1", 500),
+        "M15": client.copy_rates(cfg.symbol, "M15", 800),
+        "M5": client.copy_rates(cfg.symbol, "M5", 1000),
+        "M1": client.copy_rates(cfg.symbol, "M1", 500),
+    }
+    client.disconnect()
+    result = run_institutional_backtest(
+        frames,
+        step=args.step,
+        on_log=print if not args.quiet else (lambda m: None),
+    )
+    print("=" * 60)
+    print("INSTITUTIONAL BACKTEST (sample — not a live performance claim)")
+    print("=" * 60)
+    print(f"bars_scanned : {result.bars}")
+    print(f"signals      : {result.signals}")
+    print(f"no_trade     : {result.no_trade}")
+    print(f"trades       : {len(result.trades)}")
+    print(f"win_rate     : {result.win_rate}%")
+    print(f"profit_factor: {result.profit_factor}")
+    print(f"expectancy_R : {result.expectancy}")
+    print(f"max_DD_R     : {result.max_dd_r}")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         description="ATLAS — explainable, risk-managed MT5 trading (watch / paper / live)"
@@ -269,6 +388,34 @@ def build_parser() -> argparse.ArgumentParser:
     tb.add_argument("--seed", type=int, default=42)
     tb.add_argument("--quiet", action="store_true")
     tb.set_defaults(func=cmd_tick_backtest)
+
+    a = sub.add_parser(
+        "analyze",
+        help="Institutional SMC narrative for XAUUSD (quality gates → NO TRADE by default)",
+    )
+    a.add_argument("--symbol", default=None, help="Override symbol (default XAUUSD)")
+    a.set_defaults(func=cmd_analyze)
+
+    inst = sub.add_parser(
+        "institutional",
+        help="Continuous institutional monitor (H4→M1). Optional --execute when gates pass",
+    )
+    inst.add_argument("--poll", type=float, default=60.0, help="Seconds between analyses")
+    inst.add_argument("--cycles", type=int, default=None)
+    inst.add_argument(
+        "--execute",
+        action="store_true",
+        help="Arm execution when BUY/SELL clears all institutional gates",
+    )
+    inst.set_defaults(func=cmd_institutional)
+
+    ib = sub.add_parser(
+        "institutional-backtest",
+        help="Backtest institutional decision engine on historical MT5/synthetic bars",
+    )
+    ib.add_argument("--step", type=int, default=8, help="M15 bar step")
+    ib.add_argument("--quiet", action="store_true")
+    ib.set_defaults(func=cmd_institutional_backtest)
 
     return p
 

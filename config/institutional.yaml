@@ -1,0 +1,63 @@
+# ATLAS Institutional Market Analysis Engine — XAUUSD primary
+# Quality over quantity. Prefer NO TRADE unless confluence clears the gate.
+
+mode: PAPER  # PAPER | LIVE via ATLAS_MODE
+
+institutional:
+  symbol: XAUUSD
+  magic: 26080501
+
+  # Multi-timeframe stack (M1 = entry timing only)
+  timeframes: [H4, H1, M15, M5, M1]
+
+  # Decision gates — raise for fewer, higher-quality trades
+  min_probability: 72.0
+  min_confidence: 65.0
+  min_confluence: 70.0
+  min_reward_risk: 2.5
+  require_htf_alignment: true   # H4+H1 must agree
+  require_m1_timing: true       # M1 must confirm for EXECUTE
+
+  # Confluence weights (sum ≈ 100)
+  weights:
+    trend: 12
+    market_structure: 14
+    liquidity: 10
+    support_resistance: 10
+    order_blocks: 8
+    fair_value_gaps: 8
+    fibonacci: 8
+    trendlines: 5
+    price_action: 8
+    momentum: 5
+    volatility: 4
+    news: 4
+    session: 4
+
+  risk:
+    risk_percent: 0.35
+    max_open_positions: 1
+    max_daily_trades: 6
+    max_consecutive_losses: 3
+    daily_loss_limit_percent: 1.5
+    daily_profit_target_percent: 2.0
+    pause_after_daily_limit: true
+    atr_stop_mult: 1.2
+    atr_tp_mult: 3.0
+
+  news:
+    enabled: true
+    block_minutes_before_high: 30
+    block_minutes_after_high: 30
+    # Uses public ForexFactory-style calendar fetch when network allows;
+    # falls back to session heuristic if unavailable.
+
+  analysis:
+    swing_lookback: 3
+    structure_bars: 120
+    sr_lookback: 200
+    fib_min_swing_atr: 1.5
+    equal_level_tolerance_atr: 0.15
+
+  logging:
+    dir: logs/institutional
