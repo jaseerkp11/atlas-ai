@@ -674,3 +674,30 @@ def test_news_proximity_blocks_inside_window(monkeypatch):
     rep = pa.analyze_news(enabled=True, block_minutes_before=30, block_minutes_after=30)
     assert rep.block_trading is True
     assert rep.status == "Avoid Trading Today"
+
+
+def test_next_m5_boundary_and_watch_helpers():
+    from datetime import datetime, timezone
+
+    from atlas.live.watch import _next_m5_boundary_utc
+    from atlas.institutional.watch_m5 import _bar_open_time, _parse_bar_ts
+
+    now = datetime(2026, 8, 5, 20, 15, 34, tzinfo=timezone.utc)
+    nxt = _next_m5_boundary_utc(now)
+    assert nxt.hour == 20 and nxt.minute == 20
+    on_boundary = datetime(2026, 8, 5, 20, 15, 0, tzinfo=timezone.utc)
+    # Exactly on boundary → next one (already closed)
+    nxt2 = _next_m5_boundary_utc(on_boundary)
+    assert nxt2.minute == 20
+
+    df = pd.DataFrame(
+        {
+            "time": pd.to_datetime(
+                ["2026-08-05 22:45:00+00:00", "2026-08-05 22:50:00+00:00", "2026-08-05 22:55:00+00:00"]
+            )
+        }
+    )
+    assert "22:50" in _bar_open_time(df, -2)
+    assert "22:55" in _bar_open_time(df, -1)
+    ts = _parse_bar_ts("2026-08-05 22:50:00+00:00")
+    assert ts is not None and ts.minute == 50

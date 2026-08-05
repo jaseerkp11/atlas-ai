@@ -60,11 +60,11 @@ def _next_m5_boundary_utc(now: datetime | None = None) -> datetime:
     now = now or datetime.now(timezone.utc)
     if now.tzinfo is None:
         now = now.replace(tzinfo=timezone.utc)
-    # If exactly on a 5-min mark with 0 seconds, treat as already closed → next one
+    # If exactly on a 5-min mark, treat as already closed → next one
     floored = now.replace(second=0, microsecond=0)
     minute = (floored.minute // 5) * 5
     boundary = floored.replace(minute=minute)
-    if now <= boundary:
+    if now < boundary:
         return boundary
     return boundary + timedelta(minutes=5)
 
