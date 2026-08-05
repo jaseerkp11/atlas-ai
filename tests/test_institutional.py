@@ -416,3 +416,142 @@ def test_manual_scanner_grades_and_if_then():
     assert sell.stop_loss > sell.zone_high
     assert sell.take_profit_1 < sell.focus_price
     assert sell.take_profit_2 <= sell.take_profit_1
+
+
+def test_htf_major_h4_h1_highs_lows_marked():
+    """Explicit H4/H1 range highs/lows become major S/R trade areas."""
+    from atlas.institutional.models import MarketNarrative, utcnow
+    from atlas.institutional.trade_areas import build_trade_areas
+
+    # Synthetic impulse: grind up to ~4180 then pull back — mid at 4157
+    def _tf(n: int, step_h: int, prices: list[float]) -> pd.DataFrame:
+        rows = []
+        t0 = np.datetime64("2024-06-01T00:00:00")
+        for i, p in enumerate(prices):
+            rows.append(
+                {
+                    "time": t0 + np.timedelta64(i * step_h, "h"),
+                    "open": p - 0.5,
+                    "high": p + 1.5,
+                    "low": p - 1.5,
+                    "close": p,
+                    "tick_volume": 100,
+                }
+            )
+        # Pad to enough bars if needed
+        while len(rows) < n:
+            i = len(rows)
+            p = prices[-1]
+            rows.append(
+                {
+                    "time": t0 + np.timedelta64(i * step_h, "h"),
+                    "open": p - 0.3,
+                    "high": p + 0.8,
+                    "low": p - 0.8,
+                    "close": p,
+                    "tick_volume": 100,
+                }
+            )
+        return pd.DataFrame(rows)
+
+    # H4 path: start ~4070, spike 4180, settle ~4157
+    h4_path = (
+        [4070 + i * 4 for i in range(18)]
+        + [4180, 4175, 4168, 4160, 4157]
+    )
+    h1_path = (
+        [4070 + i * 1.5 for i in range(40)]
+        + [4180, 4172, 4165, 4160, 4157]
+    )
+    frames = {
+        "H4": _tf(40, 4, h4_path),
+        "H1": _tf(60, 1, h1_path),
+    }
+    # Force exact major high onto last closed-ish window
+    frames["H4"].loc[frames["H4"].index[-6], "high"] = 4180.0
+    frames["H1"].loc[frames["H1"].index[-8], "high"] = 4180.0
+    frames["H4"].loc[frames["H4"].index[2], "low"] = 4070.0
+
+    n = MarketNarrative(
+        symbol="XAUUSD",
+        as_of=utcnow(),
+        overall_bias=Bias.BULLISH,
+        htf_bias=Bias.BULLISH,
+        mtf_bias=Bias.BULLISH,
+        structure_summary="x",
+        liquidity_summary="x",
+        institutional_confluence="x",
+        sr_summary="x",
+        trend_quality="t",
+        volatility_regime="v",
+        best_session="London",
+        news_status="ok",
+        mid=4157.0,
+        atr_m15=8.0,
+        zones=[],
+    )
+    rep = build_trade_areas(n, liquidity=None, h1_bias=Bias.BULLISH, frames=frames)
+    htf = [a for a in rep.areas if a.kind.startswith("htf_")]
+    assert htf, "expected explicit H4/H1 major areas"
+    assert any(a.kind == "htf_resistance" and abs(a.mid_price - 4180.0) < 2.0 for a in htf)
+    assert any(a.kind == "htf_support" for a in htf)
+
+
+def test_a_plus_capped_when_rr_weak():
+    """A+ soft-caps to A when mapped R:R to TP1 is below 1.5."""
+    from atlas.institutional.manual_scanner import build_manual_scan
+    from atlas.institutional.models import MarketNarrative, utcnow
+    from atlas.institutional.trade_areas import TradeArea, TradeAreasReport
+
+    n = MarketNarrative(
+        symbol="XAUUSD",
+        as_of=utcnow(),
+        overall_bias=Bias.BULLISH,
+        htf_bias=Bias.BULLISH,
+        mtf_bias=Bias.BULLISH,
+        structure_summary="x",
+        liquidity_summary="x",
+        institutional_confluence="x",
+        sr_summary="x",
+        trend_quality="t",
+        volatility_regime="v",
+        best_session="London",
+        news_status="ok",
+        mid=4157.0,
+        atr_m15=8.0,
+    )
+    # Tight TP above entry → weak R:R; elite buy path otherwise
+    buy = TradeArea(
+        "BUY",
+        "buy_liquidity",
+        4154,
+        4156,
+        4155,
+        92,
+        0.25,
+        True,
+        ["Buy-side liquidity"],
+        "EQL",
+    )
+    sell = TradeArea(
+        "SELL",
+        "htf_resistance",
+        4157.2,
+        4157.8,
+        4157.5,
+        95,
+        0.06,
+        True,
+        ["H4 major high"],
+        "H4 major high",
+    )
+    areas = TradeAreasReport(areas=[buy, sell], buy_best=[buy], sell_best=[sell], summary="x")
+    rep = build_manual_scan(
+        n, areas, None, Bias.BULLISH, Bias.BULLISH, Bias.BULLISH, "London"
+    )
+    assert rep.buy_cards
+    card = rep.buy_cards[0]
+    assert card.reward_risk > 0
+    if card.reward_risk < 1.5:
+        assert card.grade != "A+"
+        assert any("Capped A+" in r for r in card.reasons)

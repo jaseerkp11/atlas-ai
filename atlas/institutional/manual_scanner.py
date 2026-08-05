@@ -95,6 +95,8 @@ def _grade(
         "bullish_ob",
         "bearish_ob",
         "fib_ote",
+        "htf_support",
+        "htf_resistance",
     )
 
     if against:
@@ -326,8 +328,15 @@ def _plan_sl_tp(
         # High-prob opposing areas within ~4 ATR; else any above
         near_band = [a for a in above if (a.mid_price - focus) / atr <= 4.0]
         pool = near_band if near_band else above
-        # Top scores, then order nearer→farther so TP1 < TP2
-        top = sorted(pool, key=lambda a: (-a.score, a.mid_price))[:2]
+        # Prefer HTF major highs as magnets, then score, then nearer
+        top = sorted(
+            pool,
+            key=lambda a: (
+                0 if a.kind == "htf_resistance" else 1,
+                -a.score,
+                a.mid_price,
+            ),
+        )[:2]
         top = sorted(top, key=lambda a: a.mid_price)
         if top:
             tp1 = float(top[0].mid_price)
@@ -357,8 +366,15 @@ def _plan_sl_tp(
     ]
     near_band = [a for a in below if (focus - a.mid_price) / atr <= 4.0]
     pool = near_band if near_band else below
-    # Top scores, then order nearer→farther so TP1 > TP2 for shorts
-    top = sorted(pool, key=lambda a: (-a.score, -a.mid_price))[:2]
+    # Prefer HTF major lows as magnets, then score, then nearer
+    top = sorted(
+        pool,
+        key=lambda a: (
+            0 if a.kind == "htf_support" else 1,
+            -a.score,
+            -a.mid_price,
+        ),
+    )[:2]
     top = sorted(top, key=lambda a: -a.mid_price)
     if top:
         tp1 = float(top[0].mid_price)
@@ -430,6 +446,10 @@ def build_manual_scan(
         # Use full area list for opposing TP targets (not only first 12 slice peer)
         pool = trade_areas.areas if trade_areas else [a]
         sl, tp1, tp2, sl_l, tp1_l, tp2_l, rr = _plan_sl_tp(a, pool, atr)
+        # Soft-cap A+ when R:R to zone TP1 is unclear/weak (ATR fallback often ~1.x)
+        if grade == "A+" and rr > 0 and rr < 1.5:
+            grade = "A"
+            reasons.append(f"Capped A+→A: R:R to TP1 only 1:{rr:.2f} (need ≥1.5)")
         cards.append(
             SetupCard(
                 grade=grade,
@@ -628,13 +648,13 @@ def render_manual_scan_block(
 
     if buy_n:
         _emit(
-            "BEST BUY AREAS (support / buy liquidity / bull FVG-OB / OTE)",
+            "BEST BUY AREAS (support / H4-H1 lows / buy liq / bull FVG-OB / OTE)",
             report.buy_cards,
             buy_n,
         )
     if sell_n:
         _emit(
-            "BEST SELL AREAS (resistance / sell liquidity / bear FVG-OB / OTE)",
+            "BEST SELL AREAS (resistance / H4-H1 highs / sell liq / bear FVG-OB / OTE)",
             report.sell_cards,
             sell_n,
         )

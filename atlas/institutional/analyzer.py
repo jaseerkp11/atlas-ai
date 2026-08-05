@@ -228,7 +228,11 @@ class InstitutionalAnalyzer:
         from atlas.institutional.trade_areas import build_trade_areas
 
         trade_areas = build_trade_areas(
-            narrative, liquidity=liq, h1_bias=h1_s.bias, max_per_side=5
+            narrative,
+            liquidity=liq,
+            h1_bias=h1_s.bias,
+            max_per_side=6,
+            frames=frames,
         )
         narrative.extras["trade_areas"] = trade_areas.as_dict()
         narrative.extras["trade_areas_summary"] = trade_areas.summary

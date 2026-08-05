@@ -8,6 +8,7 @@ Ranks BUY-side / SELL-side areas from live-analysis modules:
   - Unfilled / fresh Order Blocks
   - Strong S/R near price
   - Fibonacci OTE (0.618–0.786)
+  - Explicit H4/H1 major highs & lows (range extremes + confirmed swings)
 
 Scores use distance-to-mid, freshness, module strength, and HTF alignment.
 These are analysis levels for personal chart checks — not auto-orders.
@@ -16,7 +17,11 @@ These are analysis levels for personal chart checks — not auto-orders.
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
+from typing import Any
 
+import pandas as pd
+
+from atlas.analysis.structure import find_swing_highs, find_swing_lows
 from atlas.institutional.liquidity_engine import LiquidityPool, LiquidityReport
 from atlas.institutional.models import Bias, FibLevel, MarketNarrative, Zone
 
@@ -24,7 +29,7 @@ from atlas.institutional.models import Bias, FibLevel, MarketNarrative, Zone
 @dataclass
 class TradeArea:
     side: str  # BUY | SELL
-    kind: str  # buy_liquidity | sell_liquidity | bullish_fvg | bearish_fvg | bullish_ob | bearish_ob | support | resistance | fib_ote
+    kind: str  # buy_liquidity | sell_liquidity | bullish_fvg | bearish_fvg | bullish_ob | bearish_ob | support | resistance | fib_ote | htf_support | htf_resistance
     price_low: float
     price_high: float
     mid_price: float
@@ -205,6 +210,106 @@ def _from_liquidity(
     )
 
 
+def _htf_major_areas(
+    frames: dict[str, Any] | None,
+    mid: float,
+    atr: float,
+    overall: Bias,
+    h1: Bias,
+) -> list[TradeArea]:
+    """
+    Explicit previous H4/H1 highs & lows as major S/R magnets.
+
+    Clustered multi-TF S/R already exists; this adds first-class levels for:
+      - recent H4/H1 range high/low (catches impulse extremes like a 4180 high)
+      - last confirmed H4/H1 swing high/low
+      - previous completed H4/H1 candle high/low
+    Kept even when somewhat distant so they remain TP / danger anchors.
+    """
+    if not frames:
+        return []
+
+    out: list[TradeArea] = []
+    specs = (
+        ("H4", 2, 20, 94.0, 14.0),  # tf, swing_lb, range_bars, base_score, max_dist_atr
+        ("H1", 3, 24, 88.0, 10.0),
+    )
+
+    for tf, swing_lb, range_bars, base, max_dist in specs:
+        df = frames.get(tf)
+        if df is None or not isinstance(df, pd.DataFrame) or len(df) < max(30, swing_lb * 2 + 5):
+            continue
+        # Prefer closed bars so the forming candle does not invent a "major"
+        closed = df.iloc[:-1] if len(df) >= 2 else df
+        if len(closed) < 10:
+            continue
+
+        window = closed.tail(min(range_bars, len(closed)))
+        range_high = float(window["high"].max())
+        range_low = float(window["low"].min())
+        last = closed.iloc[-1]
+        prev_high = float(last["high"])
+        prev_low = float(last["low"])
+
+        sh = find_swing_highs(closed, lookback=swing_lb)
+        sl = find_swing_lows(closed, lookback=swing_lb)
+        swing_high = float(sh[-1].price) if sh else None
+        swing_low = float(sl[-1].price) if sl else None
+
+        candidates: list[tuple[str, float, str, float]] = [
+            ("high", range_high, f"{tf} major high (recent range)", base + 3.0),
+            ("low", range_low, f"{tf} major low (recent range)", base + 3.0),
+            ("high", prev_high, f"Prev {tf} candle high", base - 2.0),
+            ("low", prev_low, f"Prev {tf} candle low", base - 2.0),
+        ]
+        if swing_high is not None:
+            candidates.append(("high", swing_high, f"{tf} swing high", base))
+        if swing_low is not None:
+            candidates.append(("low", swing_low, f"{tf} swing low", base))
+
+        # De-dupe within TF (~0.25 ATR), keep highest score label
+        kept_local: list[tuple[str, float, str, float]] = []
+        for kind_hl, price, label, sc in sorted(candidates, key=lambda x: -x[3]):
+            if any(abs(price - p) / atr < 0.25 and kind_hl == k for k, p, _, _ in kept_local):
+                continue
+            kept_local.append((kind_hl, price, label, sc))
+
+        half = atr * (0.18 if tf == "H4" else 0.12)
+        for kind_hl, price, label, sc in kept_local:
+            dist = _dist_atr(price, mid, atr)
+            if dist > max_dist:
+                continue
+            side = "SELL" if kind_hl == "high" else "BUY"
+            area_kind = "htf_resistance" if kind_hl == "high" else "htf_support"
+            score = sc + _proximity_boost(dist) + _htf_align_boost(side, overall, h1)
+            # HTF majors stay useful as targets even against bias (don't crush score)
+            if side == "SELL" and h1 == Bias.BULLISH:
+                score += 8.0  # undo most of against-bias penalty — still a magnet
+            if side == "BUY" and h1 == Bias.BEARISH:
+                score += 8.0
+            score = max(0.0, min(100.0, score))
+            out.append(
+                TradeArea(
+                    side=side,
+                    kind=area_kind,
+                    price_low=price - half,
+                    price_high=price + half,
+                    mid_price=price,
+                    score=score,
+                    distance_atr=dist,
+                    fresh_unfilled=True,
+                    reasons=[
+                        label,
+                        f"Major {tf} {'resistance' if kind_hl == 'high' else 'support'} "
+                        f"@ {price:.2f} ({dist:.2f} ATR from mid)",
+                        "Use as TP / danger / invalidation anchor on TradingView",
+                    ],
+                    label=label,
+                )
+            )
+    return out
+
+
 def _from_fib(
     lv: FibLevel,
     mid: float,
@@ -257,6 +362,7 @@ def build_trade_areas(
     liquidity: LiquidityReport | None = None,
     h1_bias: Bias = Bias.NEUTRAL,
     max_per_side: int = 5,
+    frames: dict[str, Any] | None = None,
 ) -> TradeAreasReport:
     mid = narrative.mid
     atr = max(narrative.atr_m15, 1e-9)
@@ -279,6 +385,8 @@ def build_trade_areas(
         if a is not None:
             areas.append(a)
 
+    areas.extend(_htf_major_areas(frames, mid, atr, overall, h1_bias))
+
     # De-dupe near-identical prices (same side, within 0.2 ATR)
     areas.sort(key=lambda x: -x.score)
     kept: list[TradeArea] = []
@@ -292,6 +400,10 @@ def build_trade_areas(
                 if a.kind not in k.kind and a.score >= k.score - 5:
                     k.reasons.append(f"+ overlap {a.kind} ({a.label})")
                     k.score = min(100.0, k.score + 3.0)
+                    # Promote to HTF kind when a major overlaps a weaker zone
+                    if a.kind.startswith("htf_") and not k.kind.startswith("htf_"):
+                        k.kind = a.kind
+                        k.label = a.label or k.label
                 clash = True
                 break
         if not clash:
@@ -321,7 +433,7 @@ def render_trade_areas_block(report: TradeAreasReport | None, mid: float = 0.0) 
 
     lines.append(f"  Mid reference: {mid:.3f}  |  {report.summary}")
     lines.append("")
-    lines.append("  BUY-SIDE AREAS (long interest / buy liquidity / bull FVG-OB)")
+    lines.append("  BUY-SIDE AREAS (long interest / buy liquidity / bull FVG-OB / H4-H1 lows)")
     if report.buy_best:
         for i, a in enumerate(report.buy_best, 1):
             uf = "UNFILLED" if a.fresh_unfilled else "touched"
@@ -336,7 +448,7 @@ def render_trade_areas_block(report: TradeAreasReport | None, mid: float = 0.0) 
         lines.append("     (none ranked)")
 
     lines.append("")
-    lines.append("  SELL-SIDE AREAS (short interest / sell liquidity / bear FVG-OB)")
+    lines.append("  SELL-SIDE AREAS (short interest / sell liquidity / bear FVG-OB / H4-H1 highs)")
     if report.sell_best:
         for i, a in enumerate(report.sell_best, 1):
             uf = "UNFILLED" if a.fresh_unfilled else "touched"
