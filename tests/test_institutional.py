@@ -403,4 +403,16 @@ def test_manual_scanner_grades_and_if_then():
     assert rep.buy_cards
     assert "WAIT:" in rep.buy_cards[0].if_then and "THEN:" in rep.buy_cards[0].if_then
     assert rep.buy_cards[0].grade in ("A+", "A", "B")
+    assert rep.buy_cards[0].stop_loss > 0
+    assert rep.buy_cards[0].stop_loss < rep.buy_cards[0].zone_low
+    assert rep.buy_cards[0].take_profit_1 > rep.buy_cards[0].focus_price
+    assert rep.buy_cards[0].take_profit_2 >= rep.buy_cards[0].take_profit_1
+    # BUY TP should map to opposing SELL resistance mid when available
+    assert abs(rep.buy_cards[0].take_profit_1 - 4056.0) < 1e-6
     assert any(c.side == "SELL" for c in rep.sell_cards)
+    # Against-H1 sells stay B / AVOID when H1 bullish — intentional
+    assert all(c.grade == "B" and c.status == "AVOID_NOW" for c in rep.sell_cards)
+    sell = rep.sell_cards[0]
+    assert sell.stop_loss > sell.zone_high
+    assert sell.take_profit_1 < sell.focus_price
+    assert sell.take_profit_2 <= sell.take_profit_1

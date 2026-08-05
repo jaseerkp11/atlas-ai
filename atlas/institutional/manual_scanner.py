@@ -34,6 +34,14 @@ class SetupCard:
     invalidation: str
     avoid: str
     reasons: list[str] = field(default_factory=list)
+    # Manual risk map (from opposing high-prob areas) — not auto orders
+    stop_loss: float = 0.0
+    take_profit_1: float = 0.0
+    take_profit_2: float = 0.0
+    sl_label: str = ""
+    tp1_label: str = ""
+    tp2_label: str = ""
+    reward_risk: float = 0.0
 
     def as_dict(self) -> dict:
         return asdict(self)
@@ -278,6 +286,100 @@ def _if_then(area: TradeArea, market_mid: float) -> tuple[str, list[str], str, s
     )
 
 
+def _plan_sl_tp(
+    area: TradeArea,
+    all_areas: list[TradeArea],
+    atr: float,
+) -> tuple[float, float, float, str, str, str, float]:
+    """
+    Map SL/TP from high-probability opposing areas.
+    BUY: SL under entry zone; TP at resistance / sell-liquidity / bear FVG above.
+    SELL: SL above entry zone; TP at support / buy-liquidity / bull FVG below.
+    """
+    atr = max(float(atr), 1e-9)
+    lo, hi, focus = area.price_low, area.price_high, area.mid_price
+    buffer = atr * 0.20
+
+    def _rr(entry: float, sl: float, tp: float, side: str) -> float:
+        if side == "BUY":
+            risk = entry - sl
+            reward = tp - entry
+        else:
+            risk = sl - entry
+            reward = entry - tp
+        if risk <= 1e-9:
+            return 0.0
+        return round(reward / risk, 2)
+
+    if area.side == "BUY":
+        sl = lo - buffer
+        sl_label = f"below buy zone {lo:.2f} (−{buffer:.2f})"
+        # Targets above: sell-side / resistance style areas
+        above = sorted(
+            [
+                a
+                for a in all_areas
+                if a.side == "SELL" and a.mid_price > hi + atr * 0.15
+            ],
+            key=lambda a: a.mid_price,
+        )
+        # High-prob opposing areas within ~4 ATR; else any above
+        near_band = [a for a in above if (a.mid_price - focus) / atr <= 4.0]
+        pool = near_band if near_band else above
+        # Top scores, then order nearer→farther so TP1 < TP2
+        top = sorted(pool, key=lambda a: (-a.score, a.mid_price))[:2]
+        top = sorted(top, key=lambda a: a.mid_price)
+        if top:
+            tp1 = float(top[0].mid_price)
+            tp1_label = f"{top[0].kind} @{tp1:.2f} (score={top[0].score:.0f})"
+            if len(top) > 1:
+                tp2 = float(top[1].mid_price)
+                tp2_label = f"{top[1].kind} @{tp2:.2f} (score={top[1].score:.0f})"
+            else:
+                tp2 = tp1 + atr * 1.5
+                tp2_label = f"extension +1.5 ATR @{tp2:.2f}"
+        else:
+            tp1 = focus + atr * 1.5
+            tp2 = focus + atr * 2.5
+            tp1_label = f"ATR target +1.5 @{tp1:.2f}"
+            tp2_label = f"ATR target +2.5 @{tp2:.2f}"
+        # Ensure TP above entry
+        tp1 = max(tp1, hi + atr * 0.35)
+        tp2 = max(tp2, tp1 + atr * 0.35)
+        rr = _rr(focus, sl, tp1, "BUY")
+        return sl, tp1, tp2, sl_label, tp1_label, tp2_label, rr
+
+    # SELL
+    sl = hi + buffer
+    sl_label = f"above sell zone {hi:.2f} (+{buffer:.2f})"
+    below = [
+        a for a in all_areas if a.side == "BUY" and a.mid_price < lo - atr * 0.15
+    ]
+    near_band = [a for a in below if (focus - a.mid_price) / atr <= 4.0]
+    pool = near_band if near_band else below
+    # Top scores, then order nearer→farther so TP1 > TP2 for shorts
+    top = sorted(pool, key=lambda a: (-a.score, -a.mid_price))[:2]
+    top = sorted(top, key=lambda a: -a.mid_price)
+    if top:
+        tp1 = float(top[0].mid_price)
+        tp1_label = f"{top[0].kind} @{tp1:.2f} (score={top[0].score:.0f})"
+        if len(top) > 1:
+            tp2 = float(top[1].mid_price)
+            tp2_label = f"{top[1].kind} @{tp2:.2f} (score={top[1].score:.0f})"
+        else:
+            tp2 = tp1 - atr * 1.5
+            tp2_label = f"extension −1.5 ATR @{tp2:.2f}"
+    else:
+        tp1 = focus - atr * 1.5
+        tp2 = focus - atr * 2.5
+        tp1_label = f"ATR target −1.5 @{tp1:.2f}"
+        tp2_label = f"ATR target −2.5 @{tp2:.2f}"
+    tp1 = min(tp1, lo - atr * 0.35)
+    tp2 = min(tp2, tp1 - atr * 0.35)
+    rr = _rr(focus, sl, tp1, "SELL")
+    return sl, tp1, tp2, sl_label, tp1_label, tp2_label, rr
+
+
 def build_manual_scan(
     narrative: MarketNarrative,
     trade_areas: TradeAreasReport | None,
@@ -290,6 +392,7 @@ def build_manual_scan(
     killzone = session_name in ("London", "NewYork", "London-NY Overlap")
     agree_stack = h1_bias != Bias.NEUTRAL and h1_bias == m15_bias
     market_mid = float(narrative.mid)
+    atr = max(float(narrative.atr_m15 or 0.0), 1e-9)
 
     if h1_bias == Bias.BULLISH:
         stance = "LONG_BIAS"
@@ -322,9 +425,11 @@ def build_manual_scan(
         if status == "AVOID_NOW":
             ift = "SKIP ENTRY (against H1). " + ift
 
-# Ensure zone_low <= zone_high when building cards from areas
         lo = min(a.price_low, a.price_high)
         hi = max(a.price_low, a.price_high)
+        # Use full area list for opposing TP targets (not only first 12 slice peer)
+        pool = trade_areas.areas if trade_areas else [a]
+        sl, tp1, tp2, sl_l, tp1_l, tp2_l, rr = _plan_sl_tp(a, pool, atr)
         cards.append(
             SetupCard(
                 grade=grade,
@@ -340,6 +445,13 @@ def build_manual_scan(
                 invalidation=inv,
                 avoid=avoid,
                 reasons=reasons,
+                stop_loss=sl,
+                take_profit_1=tp1,
+                take_profit_2=tp2,
+                sl_label=sl_l,
+                tp1_label=tp1_l,
+                tp2_label=tp2_l,
+                reward_risk=rr,
             )
         )
 
@@ -493,6 +605,19 @@ def render_manual_scan_block(
                 lines.append(f"      {p}")
             lines.append(f"      {c.invalidation}")
             lines.append(f"      {c.avoid}")
+            if c.stop_loss > 0 and c.take_profit_1 > 0:
+                lines.append(
+                    f"      SL  : {c.stop_loss:.2f}  ({c.sl_label})"
+                )
+                lines.append(
+                    f"      TP1 : {c.take_profit_1:.2f}  ({c.tp1_label})"
+                )
+                if c.take_profit_2 > 0:
+                    lines.append(
+                        f"      TP2 : {c.take_profit_2:.2f}  ({c.tp2_label})"
+                    )
+                if c.reward_risk > 0:
+                    lines.append(f"      R:R : 1:{c.reward_risk:.2f}  (to TP1, from zone mid)")
             if not brief:
                 for t in c.confirm_on_tv[:2]:
                     lines.append(f"      TV · {t}")
