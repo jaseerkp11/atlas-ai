@@ -555,3 +555,57 @@ def test_a_plus_capped_when_rr_weak():
     if card.reward_risk < 1.5:
         assert card.grade != "A+"
         assert any("Capped A+" in r for r in card.reasons)
+
+
+def test_side_compare_board_flags_correction_risk():
+    """Raw sell scores can lean SELL even when H1 grades sells as B/AVOID."""
+    from atlas.institutional.manual_scanner import build_manual_scan, render_manual_scan_block
+    from atlas.institutional.models import MarketNarrative, utcnow
+    from atlas.institutional.trade_areas import TradeArea, TradeAreasReport
+
+    n = MarketNarrative(
+        symbol="XAUUSD",
+        as_of=utcnow(),
+        overall_bias=Bias.BULLISH,
+        htf_bias=Bias.BULLISH,
+        mtf_bias=Bias.BULLISH,
+        structure_summary="x",
+        liquidity_summary="x",
+        institutional_confluence="x",
+        sr_summary="x",
+        trend_quality="t",
+        volatility_regime="v",
+        best_session="London",
+        news_status="ok",
+        mid=4175.0,
+        atr_m15=8.0,
+    )
+    buy = TradeArea(
+        "BUY", "support", 4150, 4152, 4151, 70, 3.0, True, ["Support"], "S"
+    )
+    sell_a = TradeArea(
+        "SELL", "htf_resistance", 4178, 4182, 4180, 96, 0.6, True, ["H4 high"], "H4"
+    )
+    sell_b = TradeArea(
+        "SELL", "bearish_fvg", 4176, 4179, 4177.5, 93, 0.3, True, ["Bear FVG"], "BFVG"
+    )
+    sell_c = TradeArea(
+        "SELL", "resistance", 4174, 4176, 4175, 90, 0.1, True, ["R"], "R"
+    )
+    areas = TradeAreasReport(
+        areas=[buy, sell_a, sell_b, sell_c],
+        buy_best=[buy],
+        sell_best=[sell_a, sell_b, sell_c],
+        summary="x",
+    )
+    rep = build_manual_scan(
+        n, areas, None, Bias.BULLISH, Bias.BULLISH, Bias.BULLISH, "London"
+    )
+    assert rep.side_compare is not None
+    assert rep.side_compare.lean == "SELL_LEAN"
+    assert rep.side_compare.sell_pressure > rep.side_compare.buy_pressure
+    assert "CORRECTION RISK" in rep.side_compare.advice
+    assert all(c.grade == "B" for c in rep.sell_cards)
+    text = "\n".join(render_manual_scan_block(rep, mid=4175.0, brief=False))
+    assert "BUY vs SELL PROBABILITY BOARD" in text
+    assert "SELL_LEAN" in text

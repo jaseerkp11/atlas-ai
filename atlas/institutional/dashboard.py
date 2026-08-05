@@ -24,14 +24,27 @@ def _setup_status(decision: InstitutionalDecision) -> str:
 
 
 def _load_report(n):
-    from atlas.institutional.manual_scanner import ManualScanReport, SetupCard
+    from dataclasses import fields
+
+    from atlas.institutional.manual_scanner import (
+        ManualScanReport,
+        SetupCard,
+        SideCompareBoard,
+    )
 
     raw = (n.extras.get("manual_scan") if n else None) or {}
     if not raw:
         return None
 
     def _card(d: dict) -> SetupCard:
-        return SetupCard(**d)
+        known = {f.name for f in fields(SetupCard)}
+        return SetupCard(**{k: v for k, v in d.items() if k in known})
+
+    def _side_compare(d) -> SideCompareBoard | None:
+        if not isinstance(d, dict) or not d:
+            return None
+        known = {f.name for f in fields(SideCompareBoard)}
+        return SideCompareBoard(**{k: v for k, v in d.items() if k in known})
 
     return ManualScanReport(
         bias=str(raw.get("bias", "")),
@@ -43,6 +56,7 @@ def _load_report(n):
         watchlist=list(raw.get("watchlist") or []),
         do_not=list(raw.get("do_not") or []),
         summary=str(raw.get("summary", "")),
+        side_compare=_side_compare(raw.get("side_compare")),
     )
 
 

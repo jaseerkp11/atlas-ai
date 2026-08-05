@@ -48,6 +48,40 @@ class SetupCard:
 
 
 @dataclass
+class SideCompareBoard:
+    """
+    Raw structure probability — independent of H1 grade (A/B).
+
+    Grade = bias filter (what to prefer). Board = which side has stronger
+    support/resistance/FVG pressure right now (including correction risk).
+    """
+
+    buy_best: float = 0.0
+    sell_best: float = 0.0
+    buy_avg_top3: float = 0.0
+    sell_avg_top3: float = 0.0
+    buy_pressure: float = 0.0  # sum top-3 scores
+    sell_pressure: float = 0.0
+    support_best: float = 0.0
+    resistance_best: float = 0.0
+    bull_fvg_best: float = 0.0
+    bear_fvg_best: float = 0.0
+    bull_ob_best: float = 0.0
+    bear_ob_best: float = 0.0
+    buy_liq_best: float = 0.0
+    sell_liq_best: float = 0.0
+    htf_support_best: float = 0.0
+    htf_resistance_best: float = 0.0
+    lean: str = "BALANCED"  # BUY_LEAN | SELL_LEAN | BALANCED
+    edge: float = 0.0  # buy_pressure - sell_pressure
+    advice: str = ""
+    rows: list[str] = field(default_factory=list)
+
+    def as_dict(self) -> dict:
+        return asdict(self)
+
+
+@dataclass
 class ManualScanReport:
     bias: str
     stance: str  # LONG_BIAS | SHORT_BIAS | NO_EDGE
@@ -58,6 +92,7 @@ class ManualScanReport:
     watchlist: list[str]
     do_not: list[str]
     summary: str
+    side_compare: SideCompareBoard | None = None
 
     def as_dict(self) -> dict:
         return {
@@ -70,7 +105,120 @@ class ManualScanReport:
             "watchlist": self.watchlist,
             "do_not": self.do_not,
             "summary": self.summary,
+            "side_compare": self.side_compare.as_dict() if self.side_compare else None,
         }
+
+
+def _best_kind(cards: list[SetupCard], kinds: set[str]) -> float:
+    vals = [c.score for c in cards if c.kind in kinds]
+    return max(vals) if vals else 0.0
+
+
+def _top_stats(cards: list[SetupCard], n: int = 3) -> tuple[float, float, float]:
+    """Return (best, avg_top_n, pressure_sum_top_n)."""
+    if not cards:
+        return 0.0, 0.0, 0.0
+    scores = sorted((c.score for c in cards), reverse=True)[:n]
+    best = scores[0]
+    avg = sum(scores) / len(scores)
+    return best, round(avg, 1), round(sum(scores), 1)
+
+
+def build_side_compare(
+    buy_cards: list[SetupCard],
+    sell_cards: list[SetupCard],
+    stance: str,
+) -> SideCompareBoard:
+    """
+    Compare buy vs sell structure scores (support/resistance/FVG/OB/liq/HTF).
+
+    Intentionally ignores H1 grade so a B-grade sell can still outrank an A buy
+    on raw zone pressure — that flags correction risk for the human trader.
+    """
+    buy_best, buy_avg, buy_pressure = _top_stats(buy_cards)
+    sell_best, sell_avg, sell_pressure = _top_stats(sell_cards)
+    edge = round(buy_pressure - sell_pressure, 1)
+
+    if edge >= 12:
+        lean = "BUY_LEAN"
+    elif edge <= -12:
+        lean = "SELL_LEAN"
+    else:
+        lean = "BALANCED"
+
+    support_best = _best_kind(buy_cards, {"support", "htf_support"})
+    resistance_best = _best_kind(sell_cards, {"resistance", "htf_resistance"})
+    bull_fvg = _best_kind(buy_cards, {"bullish_fvg"})
+    bear_fvg = _best_kind(sell_cards, {"bearish_fvg"})
+    bull_ob = _best_kind(buy_cards, {"bullish_ob"})
+    bear_ob = _best_kind(sell_cards, {"bearish_ob"})
+    buy_liq = _best_kind(buy_cards, {"buy_liquidity"})
+    sell_liq = _best_kind(sell_cards, {"sell_liquidity"})
+    htf_sup = _best_kind(buy_cards, {"htf_support"})
+    htf_res = _best_kind(sell_cards, {"htf_resistance"})
+
+    def _pair(label: str, b: float, s: float) -> str:
+        winner = "BUY" if b > s + 1 else ("SELL" if s > b + 1 else "TIE")
+        return f"{label:<14} BUY {b:5.0f}  vs  SELL {s:5.0f}   → {winner}"
+
+    rows = [
+        _pair("Overall best", buy_best, sell_best),
+        _pair("Top3 avg", buy_avg, sell_avg),
+        _pair("Pressure Σ3", buy_pressure, sell_pressure),
+        _pair("Support/Res", support_best, resistance_best),
+        _pair("FVG", bull_fvg, bear_fvg),
+        _pair("Order Block", bull_ob, bear_ob),
+        _pair("Liquidity", buy_liq, sell_liq),
+        _pair("HTF major", htf_sup, htf_res),
+    ]
+
+    if stance == "LONG_BIAS" and lean == "SELL_LEAN":
+        advice = (
+            "CORRECTION RISK: sell-side scores > buy — do not force A/A+ longs. "
+            "Wait bounce confirm, or watch resistance rejection as a correction (smaller size)."
+        )
+    elif stance == "SHORT_BIAS" and lean == "BUY_LEAN":
+        advice = (
+            "BOUNCE RISK: buy-side scores > sell — do not force A/A+ shorts. "
+            "Wait reject confirm, or watch support reclaim as a bounce (smaller size)."
+        )
+    elif stance == "LONG_BIAS" and lean == "BUY_LEAN":
+        advice = "Aligned: buy structure leads — prefer graded BUY cards; sells stay targets/danger."
+    elif stance == "SHORT_BIAS" and lean == "SELL_LEAN":
+        advice = "Aligned: sell structure leads — prefer graded SELL cards; buys stay targets/danger."
+    elif lean == "BALANCED":
+        advice = (
+            "Balanced pressure — wait for clearer zone reaction before choosing side; "
+            "grade still follows H1 bias."
+        )
+    else:
+        advice = (
+            f"Structure lean={lean} while stance={stance} — use board to size/skip, "
+            "not to ignore H1 grade filter on full-size entries."
+        )
+
+    return SideCompareBoard(
+        buy_best=buy_best,
+        sell_best=sell_best,
+        buy_avg_top3=buy_avg,
+        sell_avg_top3=sell_avg,
+        buy_pressure=buy_pressure,
+        sell_pressure=sell_pressure,
+        support_best=support_best,
+        resistance_best=resistance_best,
+        bull_fvg_best=bull_fvg,
+        bear_fvg_best=bear_fvg,
+        bull_ob_best=bull_ob,
+        bear_ob_best=bear_ob,
+        buy_liq_best=buy_liq,
+        sell_liq_best=sell_liq,
+        htf_support_best=htf_sup,
+        htf_resistance_best=htf_res,
+        lean=lean,
+        edge=edge,
+        advice=advice,
+        rows=rows,
+    )
 
 
 def _grade(
@@ -528,7 +676,8 @@ def build_manual_scan(
     do_not = [
         "Do NOT auto-trade from this scanner — confirm on TradingView yourself",
         "Do NOT enter mid-range without tagging a graded zone + IF/THEN trigger",
-        "Do NOT fight H1 bias on B-grade / AVOID_NOW cards",
+        "Do NOT fight H1 bias on full-size entries just because board leans the other way",
+        "Do NOT force A/A+ longs when board shows SELL_LEAN near major resistance",
         "Do NOT treat WAIT_FOR_RECLAIM zones above/below mid as immediate dip entries",
     ]
     if not killzone:
@@ -555,6 +704,22 @@ def build_manual_scan(
     else:
         summary = f"stance={stance} cards={len(cards)} A+={a_plus} A={a_cnt}"
 
+    side_compare = build_side_compare(buy, sell, stance)
+    summary = (
+        f"{summary} | board={side_compare.lean} "
+        f"BUYΣ{side_compare.buy_pressure:.0f}/SELLΣ{side_compare.sell_pressure:.0f}"
+    )
+    if side_compare.lean == "SELL_LEAN" and stance == "LONG_BIAS":
+        watchlist.insert(
+            0 if not watchlist or not str(watchlist[0]).startswith("FOCUS") else 1,
+            "BOARD: sell pressure > buy — correction risk; skip forcing longs",
+        )
+    elif side_compare.lean == "BUY_LEAN" and stance == "SHORT_BIAS":
+        watchlist.insert(
+            0 if not watchlist or not str(watchlist[0]).startswith("FOCUS") else 1,
+            "BOARD: buy pressure > sell — bounce risk; skip forcing shorts",
+        )
+
     return ManualScanReport(
         bias=h1_bias.value,
         stance=stance,
@@ -565,6 +730,7 @@ def build_manual_scan(
         watchlist=watchlist,
         do_not=do_not,
         summary=summary,
+        side_compare=side_compare,
     )
 
 
@@ -587,6 +753,21 @@ def render_manual_scan_block(
     lines.append(f"  Plan     : {report.headline}")
     lines.append(f"  Snapshot : {report.summary}")
 
+    sc = report.side_compare
+    if sc is not None:
+        lines.append("-" * 72)
+        lines.append("  BUY vs SELL PROBABILITY BOARD  (raw scores — not H1 grade)")
+        lines.append(
+            f"  Lean={sc.lean}  edge={sc.edge:+.0f}  "
+            f"(BUY pressure Σ{sc.buy_pressure:.0f} vs SELL Σ{sc.sell_pressure:.0f})"
+        )
+        for row in sc.rows:
+            lines.append(f"    {row}")
+        lines.append(f"  → {sc.advice}")
+        lines.append(
+            "  Note: Grade A/B = bias filter. Board = structure strength. Use both."
+        )
+
     lines.append("-" * 72)
     lines.append("  WATCHLIST")
     for w in report.watchlist[:6]:
@@ -597,16 +778,21 @@ def render_manual_scan_block(
     for d in report.do_not[:5]:
         lines.append(f"    • {d}")
 
+    # Always show both sides so correction trades are visible even under HTF bias
     buy_n = 3 if brief else 5
-    sell_n = 2 if brief else 5
+    sell_n = 3 if brief else 5
     if brief and report.stance == "LONG_BIAS":
         lines.append("-" * 72)
-        lines.append("  Sells: SKIP entries (against H1) — resistance/targets only")
-        sell_n = 0
+        lines.append(
+            "  Sells under LONG_BIAS: grade B / AVOID for full-size shorts — "
+            "still shown for correction watch + board compare"
+        )
     elif brief and report.stance == "SHORT_BIAS":
         lines.append("-" * 72)
-        lines.append("  Buys: SKIP entries (against H1) — support/targets only")
-        buy_n = 0
+        lines.append(
+            "  Buys under SHORT_BIAS: grade B / AVOID for full-size longs — "
+            "still shown for bounce watch + board compare"
+        )
 
     def _emit(title: str, cards: list[SetupCard], limit: int) -> None:
         lines.append("-" * 72)
