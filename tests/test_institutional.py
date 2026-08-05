@@ -609,3 +609,68 @@ def test_side_compare_board_flags_correction_risk():
     text = "\n".join(render_manual_scan_block(rep, mid=4175.0, brief=False))
     assert "BUY vs SELL PROBABILITY BOARD" in text
     assert "SELL_LEAN" in text
+
+
+def test_plan_sl_tp_keeps_zone_magnet_price():
+    """TP must equal opposing zone mid — not push past the magnet."""
+    from atlas.institutional.manual_scanner import _plan_sl_tp
+    from atlas.institutional.trade_areas import TradeArea
+
+    buy = TradeArea("BUY", "support", 4148, 4152, 4150, 88, 0.5, True, ["S"], "S")
+    magnet = TradeArea(
+        "SELL", "htf_resistance", 4156.5, 4157.5, 4157.0, 95, 0.9, True, ["H4"], "H4"
+    )
+    sl, tp1, tp2, sl_l, tp1_l, tp2_l, rr = _plan_sl_tp(buy, [buy, magnet], atr=8.0)
+    assert abs(tp1 - 4157.0) < 1e-9
+    assert "4157.00" in tp1_l
+    assert tp1 > buy.price_high
+    assert rr > 0
+
+
+def test_news_proximity_blocks_inside_window(monkeypatch):
+    """Config block windows must gate high-impact USD events by time."""
+    from datetime import datetime, timedelta, timezone
+
+    import atlas.institutional.price_action as pa
+
+    now = datetime(2026, 8, 5, 12, 0, tzinfo=timezone.utc)
+
+    class _FakeDT:
+        @staticmethod
+        def now(tz=None):
+            return now
+
+    monkeypatch.setattr(pa, "datetime", _FakeDT)
+
+    events = [
+        {
+            "title": "FOMC Statement",
+            "country": "USD",
+            "impact": "High",
+            "date": (now + timedelta(minutes=10)).isoformat(),
+        }
+    ]
+
+    class _Resp:
+        def read(self):
+            import json
+
+            return json.dumps(events).encode()
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    class _URL:
+        @staticmethod
+        def urlopen(req, timeout=3):
+            return _Resp()
+
+    import urllib.request
+
+    monkeypatch.setattr(urllib.request, "urlopen", _URL.urlopen)
+    rep = pa.analyze_news(enabled=True, block_minutes_before=30, block_minutes_after=30)
+    assert rep.block_trading is True
+    assert rep.status == "Avoid Trading Today"

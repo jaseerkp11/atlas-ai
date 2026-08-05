@@ -82,7 +82,8 @@ def render_dashboard(decision: InstitutionalDecision, full: bool = True, brief: 
             h4 = n.extras.get("h4_bias", n.htf_bias.value)
             m15 = n.extras.get("m15_bias", n.mtf_bias.value)
             lines.append(
-                f"  {n.symbol}  mid={n.mid:.2f}  ATR={n.atr_m15:.2f}  session={n.best_session}"
+                f"  {n.symbol}  mid={n.mid:.2f}  ATR({(n.extras or {}).get('atr_tf', 'M5')}):"
+                f"{n.atr_m15:.2f}  session={n.best_session}"
             )
             lines.append(f"  Bias: {n.overall_bias.value}   H4={h4}  H1={h1}(main)  M15={m15}")
             lines.append(f"  Status: {_setup_status(decision)}")
@@ -102,7 +103,11 @@ def render_dashboard(decision: InstitutionalDecision, full: bool = True, brief: 
         m15 = n.extras.get("m15_bias", n.mtf_bias.value)
         lines.append(f"  Symbol        : {n.symbol}")
         lines.append(f"  As of (UTC)   : {n.as_of.isoformat()}")
-        lines.append(f"  Mid / ATR     : {n.mid:.3f} / {n.atr_m15:.3f}")
+        atr_tf = (n.extras or {}).get("atr_tf", "M5")
+        lines.append(f"  Mid / ATR({atr_tf}): {n.mid:.3f} / {n.atr_m15:.3f}")
+        pd_zone = (n.extras or {}).get("pd_zone")
+        if pd_zone:
+            lines.append(f"  H1 array     : {str(pd_zone).upper()}")
         lines.append(f"  Overall Bias  : {n.overall_bias.value}")
         lines.append(f"  HTF stack     : H4={h4}  H1={h1} (primary)  M15={m15}")
         lines.append(f"  Trend Quality : {n.trend_quality}")

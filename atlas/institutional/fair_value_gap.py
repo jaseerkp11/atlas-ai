@@ -35,8 +35,13 @@ def analyze_fvg(df: pd.DataFrame, mid: float) -> FVGReport:
     if df is None or len(df) < 30:
         mod = ModuleScore("fair_value_gaps", 0, 8, Bias.NEUTRAL, "no data", False)
         return FVGReport([], 0, Bias.NEUTRAL, "no data", mod)
-    atr = latest_atr(df, 14) or 1.0
-    fvgs = detect_fair_value_gaps(df)
+    # Closed bars only — forming candle must not invent phantom FVGs
+    closed = df.iloc[:-1] if len(df) >= 2 else df
+    if len(closed) < 30:
+        mod = ModuleScore("fair_value_gaps", 0, 8, Bias.NEUTRAL, "no data", False)
+        return FVGReport([], 0, Bias.NEUTRAL, "no data", mod)
+    atr = latest_atr(closed, 14) or 1.0
+    fvgs = detect_fair_value_gaps(closed)
     bull = active_fvgs_for_direction(fvgs, Direction.LONG, price=mid, atr=atr)
     bear = active_fvgs_for_direction(fvgs, Direction.SHORT, price=mid, atr=atr)
     zones: list[Zone] = []
@@ -99,8 +104,13 @@ def analyze_order_blocks(df: pd.DataFrame, mid: float) -> OBReport:
     if df is None or len(df) < 40:
         mod = ModuleScore("order_blocks", 0, 8, Bias.NEUTRAL, "no data", False)
         return OBReport([], 0, Bias.NEUTRAL, "no data", mod)
-    atr = latest_atr(df, 14) or 1.0
-    obs = detect_order_blocks(df)
+    # Closed bars only — avoid forming-bar phantom OBs
+    closed = df.iloc[:-1] if len(df) >= 2 else df
+    if len(closed) < 40:
+        mod = ModuleScore("order_blocks", 0, 8, Bias.NEUTRAL, "no data", False)
+        return OBReport([], 0, Bias.NEUTRAL, "no data", mod)
+    atr = latest_atr(closed, 14) or 1.0
+    obs = detect_order_blocks(closed)
     bull = active_order_blocks(obs, Direction.LONG, price=mid, atr=atr)
     bear = active_order_blocks(obs, Direction.SHORT, price=mid, atr=atr)
     zones: list[Zone] = []

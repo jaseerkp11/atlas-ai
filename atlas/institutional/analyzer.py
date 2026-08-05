@@ -83,11 +83,13 @@ class InstitutionalAnalyzer:
                 price_df["close"].iloc[-2] if len(price_df) >= 2 else price_df["close"].iloc[-1]
             )
         atr = latest_atr(setup_df, 14) if setup_df is not None else 1.0
+        atr_tf = "M15" if setup_df is m15 else "M5"
         # Prefer M5 ATR for distance scoring when present (same TF as mid)
         if m5 is not None and len(m5) >= 30:
             atr_m5 = latest_atr(m5, 14)
             if atr_m5:
                 atr = atr_m5
+                atr_tf = "M5"
 
         lookback = int(self.cfg.analysis.get("swing_lookback", 3))
 
@@ -119,7 +121,11 @@ class InstitutionalAnalyzer:
         pa = analyze_price_action(m5 if m5 is not None else setup_df)
         trend = analyze_trend(h1 if h1 is not None and len(h1) > 50 else setup_df)
         session = analyze_session()
-        news = analyze_news(enabled=bool(self.cfg.news.get("enabled", True)))
+        news = analyze_news(
+            enabled=bool(self.cfg.news.get("enabled", True)),
+            block_minutes_before=int(self.cfg.news.get("block_minutes_before_high", 30)),
+            block_minutes_after=int(self.cfg.news.get("block_minutes_after_high", 30)),
+        )
 
         modules = [
             trend.module,
@@ -169,6 +175,16 @@ class InstitutionalAnalyzer:
                 "m15": m15_s.summary,
                 "fib_anchor": fib.anchor_tf,
                 "session_rank": session.ranking,
+                "atr_tf": atr_tf,
+                "h1_premium": bool(getattr(h1_s, "premium", False)),
+                "h1_discount": bool(getattr(h1_s, "discount", False)),
+                "pd_zone": (
+                    "premium"
+                    if getattr(h1_s, "premium", False)
+                    else ("discount" if getattr(h1_s, "discount", False) else "equilibrium")
+                ),
+                "news_detail": news.summary,
+                "news_block": bool(news.block_trading),
             },
         )
 

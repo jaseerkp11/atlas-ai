@@ -38,11 +38,12 @@ def _session_extremes(df: pd.DataFrame) -> list[LiquidityPool]:
         return pools
     # Daily H/L from last 24h of M15/H1 bars if timestamps available
     try:
-        last = df.iloc[-1]
-        day = df.tail(96)  # ~1 day of M15
+        # Prefer closed bars so forming candle does not invent session extremes
+        closed = df.iloc[:-1] if len(df) >= 2 else df
+        day = closed.tail(96)  # ~1 day of M15
         pools.append(LiquidityPool("daily_high", float(day["high"].max()), 80, "Daily High"))
         pools.append(LiquidityPool("daily_low", float(day["low"].min()), 80, "Daily Low"))
-        week = df.tail(96 * 5)
+        week = closed.tail(96 * 5)
         pools.append(LiquidityPool("weekly_high", float(week["high"].max()), 90, "Weekly High"))
         pools.append(LiquidityPool("weekly_low", float(week["low"].min()), 90, "Weekly Low"))
     except Exception:

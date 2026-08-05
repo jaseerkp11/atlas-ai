@@ -254,62 +254,111 @@ class NewsReport:
     block_trading: bool
 
 
-def analyze_news(enabled: bool = True) -> NewsReport:
+def analyze_news(
+    enabled: bool = True,
+    block_minutes_before: int = 30,
+    block_minutes_after: int = 30,
+) -> NewsReport:
     """
-    News confidence. Attempts a lightweight public calendar; falls back to
-    weekday heuristic so the engine never hard-crashes offline.
+    News confidence. Uses public ForexFactory-style calendar when reachable;
+    blocks around high-impact USD events using configured proximity windows.
+    Falls back to weekday heuristic offline.
     """
     if not enabled:
         mod = ModuleScore("news", 70, 4, Bias.NEUTRAL, "news filter disabled", True)
         return NewsReport("Trade Today", 70, 70, "disabled", mod, False)
 
-    # Heuristic: Fridays late / known high-impact weekday windows → caution
     now = datetime.now(timezone.utc)
     status = "Trade Today"
     score = 75.0
     block = False
-    detail = "no high-impact block detected (heuristic)"
+    detail = "no high-impact USD event in proximity window"
 
-    # Try optional fetch (best-effort)
     try:
         import json
         import urllib.request
+        from dateutil import parser as date_parser  # type: ignore
 
-        # Public sample endpoint — if blocked, ignore
         url = "https://nfs.faireconomy.media/ff_calendar_thisweek.json"
         req = urllib.request.Request(url, headers={"User-Agent": "ATLAS-Institutional/1.0"})
         with urllib.request.urlopen(req, timeout=3) as resp:
             events = json.loads(resp.read().decode("utf-8"))
-        high_near = 0
+
+        before = max(0, int(block_minutes_before))
+        after = max(0, int(block_minutes_after))
+        nearest_min: float | None = None
+        nearest_title = ""
+        in_window = False
+        weekly_usd_high = 0
+
         for ev in events:
             if str(ev.get("impact", "")).lower() != "high":
                 continue
-            # Title may mention USD / gold-sensitive
-            title = str(ev.get("title", "")).lower()
+            title = str(ev.get("title", ""))
             country = str(ev.get("country", "")).upper()
-            if country not in ("USD", "United States", "US") and "usd" not in title:
+            title_l = title.lower()
+            if country not in ("USD", "UNITED STATES", "US") and "usd" not in title_l:
                 continue
-            high_near += 1
-        if high_near >= 3:
-            status = "Trade With Caution"
-            score = 50.0
-            detail = f"FF calendar: {high_near} USD high-impact events this week"
-        elif high_near >= 5:
+            weekly_usd_high += 1
+            raw_dt = ev.get("date") or ev.get("time") or ev.get("datetime")
+            if not raw_dt:
+                continue
+            try:
+                ev_dt = date_parser.parse(str(raw_dt))
+                if ev_dt.tzinfo is None:
+                    ev_dt = ev_dt.replace(tzinfo=timezone.utc)
+                else:
+                    ev_dt = ev_dt.astimezone(timezone.utc)
+            except Exception:
+                continue
+            delta_min = (ev_dt - now).total_seconds() / 60.0
+            # Inside [ -before, +after ]
+            if -before <= delta_min <= after:
+                in_window = True
+                if nearest_min is None or abs(delta_min) < abs(nearest_min):
+                    nearest_min = delta_min
+                    nearest_title = title
+            elif nearest_min is None or abs(delta_min) < abs(nearest_min):
+                nearest_min = delta_min
+                nearest_title = title
+
+        if in_window:
             status = "Avoid Trading Today"
-            score = 25.0
+            score = 20.0
             block = True
-            detail = f"FF calendar: dense USD high-impact week ({high_near})"
+            mins = int(nearest_min) if nearest_min is not None else 0
+            detail = (
+                f"HIGH IMPACT USD within ±{before}/{after}m: "
+                f"{nearest_title or 'event'} ({mins:+d}m)"
+            )
+        elif nearest_min is not None and 0 < nearest_min <= before * 3:
+            status = "Trade With Caution"
+            score = 45.0
+            detail = (
+                f"Upcoming USD high-impact in {int(nearest_min)}m: {nearest_title}"
+            )
+        elif weekly_usd_high >= 5:
+            status = "Trade With Caution"
+            score = 55.0
+            detail = f"FF calendar: dense USD high-impact week ({weekly_usd_high})"
+        else:
+            detail = (
+                f"FF calendar OK — {weekly_usd_high} USD high-impact this week, "
+                f"none inside ±{before}/{after}m window"
+            )
     except Exception:
-        # Weekend / off session soft caution
+        # Offline / parse failure — weekday soft caution
         if now.weekday() >= 5:
             status = "Avoid Trading Today"
             score = 20.0
             block = True
-            detail = "weekend — market closed / thin"
+            detail = "weekend — market closed / thin (calendar offline)"
         elif now.weekday() == 4 and now.hour >= 18:
             status = "Trade With Caution"
             score = 45.0
-            detail = "Friday late liquidity caution"
+            detail = "Friday late liquidity caution (calendar offline)"
+        else:
+            detail = "calendar offline — heuristic clear"
 
     mod = ModuleScore("news", score, 4, Bias.NEUTRAL, detail, not block and score >= 40)
     return NewsReport(status, score, score, detail, mod, block)

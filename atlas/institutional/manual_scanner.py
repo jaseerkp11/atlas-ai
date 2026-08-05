@@ -42,6 +42,7 @@ class SetupCard:
     tp1_label: str = ""
     tp2_label: str = ""
     reward_risk: float = 0.0
+    distance_atr: float = 0.0
 
     def as_dict(self) -> dict:
         return asdict(self)
@@ -495,14 +496,18 @@ def _plan_sl_tp(
             else:
                 tp2 = tp1 + atr * 1.5
                 tp2_label = f"extension +1.5 ATR @{tp2:.2f}"
+            # Keep zone magnets as-is (do not push TP past the level)
+            if tp2 <= tp1:
+                tp2 = tp1 + atr * 0.35
+                tp2_label = f"extension beyond TP1 @{tp2:.2f}"
         else:
             tp1 = focus + atr * 1.5
             tp2 = focus + atr * 2.5
             tp1_label = f"ATR target +1.5 @{tp1:.2f}"
             tp2_label = f"ATR target +2.5 @{tp2:.2f}"
-        # Ensure TP above entry
-        tp1 = max(tp1, hi + atr * 0.35)
-        tp2 = max(tp2, tp1 + atr * 0.35)
+            # ATR fallback only: enforce minimum distance above entry zone
+            tp1 = max(tp1, hi + atr * 0.35)
+            tp2 = max(tp2, tp1 + atr * 0.35)
         rr = _rr(focus, sl, tp1, "BUY")
         return sl, tp1, tp2, sl_label, tp1_label, tp2_label, rr
 
@@ -533,13 +538,16 @@ def _plan_sl_tp(
         else:
             tp2 = tp1 - atr * 1.5
             tp2_label = f"extension −1.5 ATR @{tp2:.2f}"
+        if tp2 >= tp1:
+            tp2 = tp1 - atr * 0.35
+            tp2_label = f"extension beyond TP1 @{tp2:.2f}"
     else:
         tp1 = focus - atr * 1.5
         tp2 = focus - atr * 2.5
         tp1_label = f"ATR target −1.5 @{tp1:.2f}"
         tp2_label = f"ATR target −2.5 @{tp2:.2f}"
-    tp1 = min(tp1, lo - atr * 0.35)
-    tp2 = min(tp2, tp1 - atr * 0.35)
+        tp1 = min(tp1, lo - atr * 0.35)
+        tp2 = min(tp2, tp1 - atr * 0.35)
     rr = _rr(focus, sl, tp1, "SELL")
     return sl, tp1, tp2, sl_label, tp1_label, tp2_label, rr
 
@@ -620,6 +628,7 @@ def build_manual_scan(
                 tp1_label=tp1_l,
                 tp2_label=tp2_l,
                 reward_risk=rr,
+                distance_atr=float(a.distance_atr),
             )
         )
 
@@ -655,16 +664,44 @@ def build_manual_scan(
         f"H1 bias = {h1_bias.value} (primary). H4={h4_bias.value} M15={m15_bias.value}",
         f"Session = {session_name}" + (" (killzone OK)" if killzone else " (prefer London/NY)"),
     ]
+    pd_zone = str((narrative.extras or {}).get("pd_zone", "") or "")
+    if pd_zone:
+        watchlist.append(
+            f"H1 array = {pd_zone.upper()}"
+            + (
+                " — prefer buys in discount"
+                if pd_zone == "discount" and h1_bias == Bias.BULLISH
+                else (
+                    " — prefer sells in premium"
+                    if pd_zone == "premium" and h1_bias == Bias.BEARISH
+                    else (
+                        " — wait discount pullback"
+                        if pd_zone == "premium" and h1_bias == Bias.BULLISH
+                        else (
+                            " — wait premium rally"
+                            if pd_zone == "discount" and h1_bias == Bias.BEARISH
+                            else ""
+                        )
+                    )
+                )
+            )
+        )
+    news_status = str(getattr(narrative, "news_status", "") or "")
+    news_detail = str((narrative.extras or {}).get("news_detail", "") or "")
+    if news_status and news_status != "Trade Today":
+        watchlist.append(f"NEWS: {news_status}" + (f" — {news_detail}" if news_detail else ""))
     if playbooks and playbooks.best:
         watchlist.append(f"Active playbook theme: {playbooks.best.name}")
     if playbooks and playbooks.unlock_hints:
         watchlist.extend(f"Wait: {u}" for u in playbooks.unlock_hints[:3])
 
-    # One clear focus line for the trader
+    # One clear focus line for the trader (include reclaim magnets, not only trigger-ready)
     focus_cards = [
         c
         for c in (buy if stance == "LONG_BIAS" else sell if stance == "SHORT_BIAS" else cards)
-        if c.status in ("WAIT_FOR_TRIGGER", "READY_TO_WATCH") and c.grade in ("A+", "A")
+        if c.status
+        in ("WAIT_FOR_TRIGGER", "READY_TO_WATCH", "WAIT_FOR_RECLAIM", "WAIT_FOR_ZONE")
+        and c.grade in ("A+", "A")
     ]
     if focus_cards:
         f0 = focus_cards[0]
@@ -680,6 +717,10 @@ def build_manual_scan(
         "Do NOT force A/A+ longs when board shows SELL_LEAN near major resistance",
         "Do NOT treat WAIT_FOR_RECLAIM zones above/below mid as immediate dip entries",
     ]
+    if news_status == "Avoid Trading Today" or bool((narrative.extras or {}).get("news_block")):
+        do_not.insert(0, f"Do NOT trade through news block — {news_detail or news_status}")
+    elif news_status == "Trade With Caution":
+        do_not.insert(0, f"Reduce size / skip new entries — {news_detail or news_status}")
     if not killzone:
         do_not.append("Outside killzone — reduce size or skip until London/NY")
 
@@ -804,7 +845,8 @@ def render_manual_scan_block(
             lo, hi = min(c.zone_low, c.zone_high), max(c.zone_low, c.zone_high)
             lines.append(
                 f"  {i}. [{c.grade}] {c.side}  {lo:.2f}-{hi:.2f}  "
-                f"@{c.focus_price:.2f}  {c.kind}  score={c.score:.0f}  {c.status}"
+                f"@{c.focus_price:.2f}  {c.kind}  score={c.score:.0f}  "
+                f"dist={c.distance_atr:.2f}ATR  {c.status}"
             )
             parts = [p.strip() for p in c.if_then.split("|")]
             for p in parts:
