@@ -146,6 +146,18 @@ def render_dashboard(decision: InstitutionalDecision, full: bool = True, brief: 
                     f"{lv.classification:18} ({lv.timeframe}) score={lv.score:.0f}"
                 )
 
+        tls = n.extras.get("trendlines") or []
+        if tls:
+            lines.append("-" * 72)
+            lines.append("  TRENDLINES (H1 swings — mark on TradingView)")
+            for ln in tls:
+                lines.append(
+                    f"    {str(ln.get('kind','?')).upper():11} "
+                    f"@{float(ln.get('price', 0)):.2f}  "
+                    f"quality={ln.get('quality')}  touches={ln.get('touches')}  "
+                    f"break_prob={float(ln.get('break_prob', 0)):.0%}"
+                )
+
         lines.append("-" * 72)
         lines.append("  HIGH-PROBABILITY PLAYBOOK THEMES")
         hits = n.extras.get("playbook_hits") or []

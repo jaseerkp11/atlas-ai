@@ -406,9 +406,11 @@ def test_manual_scanner_grades_and_if_then():
     assert rep.buy_cards[0].stop_loss > 0
     assert rep.buy_cards[0].stop_loss < rep.buy_cards[0].zone_low
     assert rep.buy_cards[0].take_profit_1 > rep.buy_cards[0].focus_price
-    assert rep.buy_cards[0].take_profit_2 >= rep.buy_cards[0].take_profit_1
-    # BUY TP should map to opposing SELL resistance mid when available
-    assert abs(rep.buy_cards[0].take_profit_1 - 4056.0) < 1e-6
+    assert rep.buy_cards[0].take_profit_2 > rep.buy_cards[0].take_profit_1
+    # Prop-style: TP1 ~1:2 and TP2 ~1:3 from planned entry
+    assert rep.buy_cards[0].reward_risk >= 1.95
+    assert rep.buy_cards[0].reward_risk_tp2 >= 2.95
+    assert abs(rep.buy_cards[0].entry_price - rep.buy_cards[0].focus_price) < 1e-6
     assert any(c.side == "SELL" for c in rep.sell_cards)
     # Against-H1 sells stay B / AVOID when H1 bullish — intentional
     assert all(c.grade == "B" and c.status == "AVOID_NOW" for c in rep.sell_cards)
@@ -552,9 +554,9 @@ def test_a_plus_capped_when_rr_weak():
     assert rep.buy_cards
     card = rep.buy_cards[0]
     assert card.reward_risk > 0
-    if card.reward_risk < 1.5:
+    # Prop gate: weak R:R cannot keep A+
+    if card.reward_risk < 2.0:
         assert card.grade != "A+"
-        assert any("Capped A+" in r for r in card.reasons)
 
 
 def test_side_compare_board_flags_correction_risk():
@@ -611,20 +613,29 @@ def test_side_compare_board_flags_correction_risk():
     assert "SELL_LEAN" in text
 
 
-def test_plan_sl_tp_keeps_zone_magnet_price():
-    """TP must equal opposing zone mid — not push past the magnet."""
+def test_plan_sl_tp_prop_rr_two_and_three():
+    """TP1/TP2 target prop 1:2 / 1:3 from zone mid; near magnets are not forced TP1."""
     from atlas.institutional.manual_scanner import _plan_sl_tp
     from atlas.institutional.trade_areas import TradeArea
 
     buy = TradeArea("BUY", "support", 4148, 4152, 4150, 88, 0.5, True, ["S"], "S")
-    magnet = TradeArea(
+    # Near magnet (~$7 above) would crush R:R if used as TP1 — note-only
+    near = TradeArea(
         "SELL", "htf_resistance", 4156.5, 4157.5, 4157.0, 95, 0.9, True, ["H4"], "H4"
     )
-    sl, tp1, tp2, sl_l, tp1_l, tp2_l, rr = _plan_sl_tp(buy, [buy, magnet], atr=8.0)
-    assert abs(tp1 - 4157.0) < 1e-9
-    assert "4157.00" in tp1_l
-    assert tp1 > buy.price_high
-    assert rr > 0
+    far = TradeArea(
+        "SELL", "resistance", 4168, 4170, 4169, 90, 2.0, True, ["R"], "R"
+    )
+    entry, sl, tp1, tp2, sl_l, tp1_l, tp2_l, rr1, rr2, risk, reward, note = _plan_sl_tp(
+        buy, [buy, near, far], atr=8.0
+    )
+    assert entry == 4150.0
+    assert sl < entry
+    assert tp2 > tp1 > entry
+    assert rr1 >= 1.99
+    assert rr2 >= 2.99
+    # Near magnet before true 2R must not become a sub-2R TP1
+    assert tp1 >= entry + risk * 1.95
 
 
 def test_news_proximity_blocks_inside_window(monkeypatch):

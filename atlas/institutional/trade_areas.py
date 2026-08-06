@@ -357,6 +357,59 @@ def _from_fib(
     )
 
 
+def _from_trendlines(
+    trendlines: list[dict] | None,
+    mid: float,
+    atr: float,
+    overall: Bias,
+    h1: Bias,
+) -> list[TradeArea]:
+    """Active H1 trendline prices as support/resistance trade areas."""
+    if not trendlines:
+        return []
+    out: list[TradeArea] = []
+    half = atr * 0.12
+    for ln in trendlines:
+        kind = str(ln.get("kind", "")).lower()
+        quality = str(ln.get("quality", ""))
+        if quality == "Broken":
+            continue
+        try:
+            price = float(ln.get("price", 0))
+        except (TypeError, ValueError):
+            continue
+        if price <= 0:
+            continue
+        side = "BUY" if kind == "support" else ("SELL" if kind == "resistance" else "")
+        if not side:
+            continue
+        dist = _dist_atr(price, mid, atr)
+        if dist > 6.0:
+            continue
+        touches = int(ln.get("touches", 0) or 0)
+        score = 55.0 + touches * 8.0 + (12.0 if quality == "Strong" else 0.0)
+        score += _proximity_boost(dist) + _htf_align_boost(side, overall, h1)
+        score = max(0.0, min(100.0, score))
+        out.append(
+            TradeArea(
+                side=side,
+                kind="htf_support" if side == "BUY" else "htf_resistance",
+                price_low=price - half,
+                price_high=price + half,
+                mid_price=price,
+                score=score,
+                distance_atr=dist,
+                fresh_unfilled=True,
+                reasons=[
+                    f"H1 {kind} trendline @{price:.2f} ({quality}, touches={touches})",
+                    "Repeated swing reaction — high-prob chart pattern level",
+                ],
+                label=f"TL {kind} {quality}",
+            )
+        )
+    return out
+
+
 def build_trade_areas(
     narrative: MarketNarrative,
     liquidity: LiquidityReport | None = None,
@@ -386,7 +439,15 @@ def build_trade_areas(
             areas.append(a)
 
     areas.extend(_htf_major_areas(frames, mid, atr, overall, h1_bias))
-
+    areas.extend(
+        _from_trendlines(
+            (narrative.extras or {}).get("trendlines"),
+            mid,
+            atr,
+            overall,
+            h1_bias,
+        )
+    )
     # De-dupe near-identical prices (same side, within 0.2 ATR)
     areas.sort(key=lambda x: -x.score)
     kept: list[TradeArea] = []

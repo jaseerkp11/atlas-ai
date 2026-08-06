@@ -34,14 +34,19 @@ class SetupCard:
     invalidation: str
     avoid: str
     reasons: list[str] = field(default_factory=list)
-    # Manual risk map (from opposing high-prob areas) — not auto orders
+    # Manual risk map — prop-style 1:2 / 1:3 from zone mid + structure SL
     stop_loss: float = 0.0
     take_profit_1: float = 0.0
     take_profit_2: float = 0.0
     sl_label: str = ""
     tp1_label: str = ""
     tp2_label: str = ""
-    reward_risk: float = 0.0
+    reward_risk: float = 0.0  # to TP1
+    reward_risk_tp2: float = 0.0
+    entry_price: float = 0.0
+    risk_points: float = 0.0
+    reward_points: float = 0.0
+    magnet_note: str = ""
     distance_atr: float = 0.0
 
     def as_dict(self) -> dict:
@@ -73,6 +78,9 @@ class SideCompareBoard:
     sell_liq_best: float = 0.0
     htf_support_best: float = 0.0
     htf_resistance_best: float = 0.0
+    buy_liq_count: int = 0
+    sell_liq_count: int = 0
+    pending_proxy: str = ""  # liquidity-pressure proxy — NOT a real order book
     lean: str = "BALANCED"  # BUY_LEAN | SELL_LEAN | BALANCED
     edge: float = 0.0  # buy_pressure - sell_pressure
     advice: str = ""
@@ -157,10 +165,29 @@ def build_side_compare(
     sell_liq = _best_kind(sell_cards, {"sell_liquidity"})
     htf_sup = _best_kind(buy_cards, {"htf_support"})
     htf_res = _best_kind(sell_cards, {"htf_resistance"})
+    buy_liq_n = sum(1 for c in buy_cards if c.kind in ("buy_liquidity", "htf_support"))
+    sell_liq_n = sum(1 for c in sell_cards if c.kind in ("sell_liquidity", "htf_resistance"))
 
     def _pair(label: str, b: float, s: float) -> str:
         winner = "BUY" if b > s + 1 else ("SELL" if s > b + 1 else "TIE")
         return f"{label:<14} BUY {b:5.0f}  vs  SELL {s:5.0f}   → {winner}"
+
+    # Liquidity-pressure proxy (NOT a live order book / DOM)
+    if sell_liq_n > buy_liq_n + 1 or (sell_liq > buy_liq + 8 and sell_liq_n >= buy_liq_n):
+        pending_proxy = (
+            f"More SELL-SIDE liquidity magnets ({sell_liq_n} vs {buy_liq_n}) — "
+            "stops/resting interest likely ABOVE (proxy, not DOM)"
+        )
+    elif buy_liq_n > sell_liq_n + 1 or (buy_liq > sell_liq + 8 and buy_liq_n >= sell_liq_n):
+        pending_proxy = (
+            f"More BUY-SIDE liquidity magnets ({buy_liq_n} vs {sell_liq_n}) — "
+            "stops/resting interest likely BELOW (proxy, not DOM)"
+        )
+    else:
+        pending_proxy = (
+            f"Liquidity magnets mixed (buy={buy_liq_n} sell={sell_liq_n}) — "
+            "no clear pending-side proxy"
+        )
 
     rows = [
         _pair("Overall best", buy_best, sell_best),
@@ -171,6 +198,7 @@ def build_side_compare(
         _pair("Order Block", bull_ob, bear_ob),
         _pair("Liquidity", buy_liq, sell_liq),
         _pair("HTF major", htf_sup, htf_res),
+        f"{'Liq magnets':<14} BUY {buy_liq_n:5d}  vs  SELL {sell_liq_n:5d}",
     ]
 
     if stance == "LONG_BIAS" and lean == "SELL_LEAN":
@@ -197,6 +225,7 @@ def build_side_compare(
             f"Structure lean={lean} while stance={stance} — use board to size/skip, "
             "not to ignore H1 grade filter on full-size entries."
         )
+    advice = f"{advice} | {pending_proxy}"
 
     return SideCompareBoard(
         buy_best=buy_best,
@@ -215,6 +244,9 @@ def build_side_compare(
         sell_liq_best=sell_liq,
         htf_support_best=htf_sup,
         htf_resistance_best=htf_res,
+        buy_liq_count=buy_liq_n,
+        sell_liq_count=sell_liq_n,
+        pending_proxy=pending_proxy,
         lean=lean,
         edge=edge,
         advice=advice,
@@ -441,15 +473,24 @@ def _plan_sl_tp(
     area: TradeArea,
     all_areas: list[TradeArea],
     atr: float,
-) -> tuple[float, float, float, str, str, str, float]:
+    min_rr_tp1: float = 2.0,
+    min_rr_tp2: float = 3.0,
+) -> tuple[float, float, float, float, str, str, str, float, float, float, float, str]:
     """
-    Map SL/TP from high-probability opposing areas.
-    BUY: SL under entry zone; TP at resistance / sell-liquidity / bear FVG above.
-    SELL: SL above entry zone; TP at support / buy-liquidity / bull FVG below.
+    Prop-style risk map for challenge accounts (target 1:2 / 1:3).
+
+    Returns:
+      entry, sl, tp1, tp2, sl_label, tp1_label, tp2_label,
+      rr1, rr2, risk_pts, reward_pts, magnet_note
+
+    SL = beyond the trade zone (+ ATR buffer).
+    TP1/TP2 = structural 2R / 3R from planned entry (zone mid).
+    Opposing magnets may SNAP a TP only if they still meet min R:R;
+    nearer magnets that would crush R:R are noted as partials only.
     """
     atr = max(float(atr), 1e-9)
-    lo, hi, focus = area.price_low, area.price_high, area.mid_price
-    buffer = atr * 0.20
+    lo, hi, focus = float(area.price_low), float(area.price_high), float(area.mid_price)
+    buffer = max(atr * 0.20, abs(hi - lo) * 0.15)
 
     def _rr(entry: float, sl: float, tp: float, side: str) -> float:
         if side == "BUY":
@@ -462,94 +503,119 @@ def _plan_sl_tp(
             return 0.0
         return round(reward / risk, 2)
 
-    if area.side == "BUY":
+    side = area.side
+    entry = focus
+    if side == "BUY":
         sl = lo - buffer
         sl_label = f"below buy zone {lo:.2f} (−{buffer:.2f})"
-        # Targets above: sell-side / resistance style areas
-        above = sorted(
+        risk = max(entry - sl, atr * 0.25)
+        # Re-anchor SL if zone was tiny so risk stays meaningful
+        sl = entry - risk
+        struct_tp1 = entry + min_rr_tp1 * risk
+        struct_tp2 = entry + min_rr_tp2 * risk
+        magnets = sorted(
             [
                 a
                 for a in all_areas
-                if a.side == "SELL" and a.mid_price > hi + atr * 0.15
+                if a.side == "SELL" and a.mid_price > entry + risk * 0.5
             ],
             key=lambda a: a.mid_price,
         )
-        # High-prob opposing areas within ~4 ATR; else any above
-        near_band = [a for a in above if (a.mid_price - focus) / atr <= 4.0]
-        pool = near_band if near_band else above
-        # Prefer HTF major highs as magnets, then score, then nearer
-        top = sorted(
-            pool,
-            key=lambda a: (
-                0 if a.kind == "htf_resistance" else 1,
-                -a.score,
-                a.mid_price,
-            ),
-        )[:2]
-        top = sorted(top, key=lambda a: a.mid_price)
-        if top:
-            tp1 = float(top[0].mid_price)
-            tp1_label = f"{top[0].kind} @{tp1:.2f} (score={top[0].score:.0f})"
-            if len(top) > 1:
-                tp2 = float(top[1].mid_price)
-                tp2_label = f"{top[1].kind} @{tp2:.2f} (score={top[1].score:.0f})"
-            else:
-                tp2 = tp1 + atr * 1.5
-                tp2_label = f"extension +1.5 ATR @{tp2:.2f}"
-            # Keep zone magnets as-is (do not push TP past the level)
-            if tp2 <= tp1:
-                tp2 = tp1 + atr * 0.35
-                tp2_label = f"extension beyond TP1 @{tp2:.2f}"
-        else:
-            tp1 = focus + atr * 1.5
-            tp2 = focus + atr * 2.5
-            tp1_label = f"ATR target +1.5 @{tp1:.2f}"
-            tp2_label = f"ATR target +2.5 @{tp2:.2f}"
-            # ATR fallback only: enforce minimum distance above entry zone
-            tp1 = max(tp1, hi + atr * 0.35)
-            tp2 = max(tp2, tp1 + atr * 0.35)
-        rr = _rr(focus, sl, tp1, "BUY")
-        return sl, tp1, tp2, sl_label, tp1_label, tp2_label, rr
+        tp1, tp1_label = struct_tp1, f"prop 1:{min_rr_tp1:g} @{struct_tp1:.2f}"
+        tp2, tp2_label = struct_tp2, f"prop 1:{min_rr_tp2:g} @{struct_tp2:.2f}"
+        magnet_note = ""
+        # Snap TP1 only to magnets near the 2R band (not far 3R+ magnets)
+        for m in magnets:
+            m_rr = _rr(entry, sl, float(m.mid_price), "BUY")
+            if min_rr_tp1 <= m_rr <= min_rr_tp1 + 0.75:
+                tp1 = float(m.mid_price)
+                tp1_label = f"{m.kind} @{tp1:.2f} (~1:{m_rr:g}, score={m.score:.0f})"
+                break
+        for m in magnets:
+            m_rr = _rr(entry, sl, float(m.mid_price), "BUY")
+            if m_rr + 1e-9 >= min_rr_tp2 and float(m.mid_price) > tp1:
+                tp2 = float(m.mid_price)
+                tp2_label = f"{m.kind} @{tp2:.2f} (≥1:{min_rr_tp2:g}, score={m.score:.0f})"
+                break
+        early = [a for a in magnets if float(a.mid_price) < entry + min_rr_tp1 * risk * 0.95]
+        if early:
+            e0 = early[0]
+            magnet_note = (
+                f"Partial/danger before 2R: {e0.kind} @{e0.mid_price:.2f} "
+                f"(do not treat as full TP1)"
+            )
+        if tp2 <= tp1:
+            tp2 = max(entry + min_rr_tp2 * risk, tp1 + risk * 0.5)
+            tp2_label = f"prop ≥1:{min_rr_tp2:g} @{tp2:.2f}"
+        rr1 = _rr(entry, sl, tp1, "BUY")
+        rr2 = _rr(entry, sl, tp2, "BUY")
+        return (
+            entry,
+            sl,
+            tp1,
+            tp2,
+            sl_label,
+            tp1_label,
+            tp2_label,
+            rr1,
+            rr2,
+            round(risk, 2),
+            round(tp1 - entry, 2),
+            magnet_note,
+        )
 
     # SELL
     sl = hi + buffer
     sl_label = f"above sell zone {hi:.2f} (+{buffer:.2f})"
-    below = [
-        a for a in all_areas if a.side == "BUY" and a.mid_price < lo - atr * 0.15
-    ]
-    near_band = [a for a in below if (focus - a.mid_price) / atr <= 4.0]
-    pool = near_band if near_band else below
-    # Prefer HTF major lows as magnets, then score, then nearer
-    top = sorted(
-        pool,
-        key=lambda a: (
-            0 if a.kind == "htf_support" else 1,
-            -a.score,
-            -a.mid_price,
-        ),
-    )[:2]
-    top = sorted(top, key=lambda a: -a.mid_price)
-    if top:
-        tp1 = float(top[0].mid_price)
-        tp1_label = f"{top[0].kind} @{tp1:.2f} (score={top[0].score:.0f})"
-        if len(top) > 1:
-            tp2 = float(top[1].mid_price)
-            tp2_label = f"{top[1].kind} @{tp2:.2f} (score={top[1].score:.0f})"
-        else:
-            tp2 = tp1 - atr * 1.5
-            tp2_label = f"extension −1.5 ATR @{tp2:.2f}"
-        if tp2 >= tp1:
-            tp2 = tp1 - atr * 0.35
-            tp2_label = f"extension beyond TP1 @{tp2:.2f}"
-    else:
-        tp1 = focus - atr * 1.5
-        tp2 = focus - atr * 2.5
-        tp1_label = f"ATR target −1.5 @{tp1:.2f}"
-        tp2_label = f"ATR target −2.5 @{tp2:.2f}"
-        tp1 = min(tp1, lo - atr * 0.35)
-        tp2 = min(tp2, tp1 - atr * 0.35)
-    rr = _rr(focus, sl, tp1, "SELL")
-    return sl, tp1, tp2, sl_label, tp1_label, tp2_label, rr
+    risk = max(sl - entry, atr * 0.25)
+    sl = entry + risk
+    struct_tp1 = entry - min_rr_tp1 * risk
+    struct_tp2 = entry - min_rr_tp2 * risk
+    magnets = sorted(
+        [a for a in all_areas if a.side == "BUY" and a.mid_price < entry - risk * 0.5],
+        key=lambda a: -a.mid_price,
+    )
+    tp1, tp1_label = struct_tp1, f"prop 1:{min_rr_tp1:g} @{struct_tp1:.2f}"
+    tp2, tp2_label = struct_tp2, f"prop 1:{min_rr_tp2:g} @{struct_tp2:.2f}"
+    magnet_note = ""
+    for m in magnets:
+        m_rr = _rr(entry, sl, float(m.mid_price), "SELL")
+        if min_rr_tp1 <= m_rr <= min_rr_tp1 + 0.75:
+            tp1 = float(m.mid_price)
+            tp1_label = f"{m.kind} @{tp1:.2f} (~1:{m_rr:g}, score={m.score:.0f})"
+            break
+    for m in magnets:
+        m_rr = _rr(entry, sl, float(m.mid_price), "SELL")
+        if m_rr + 1e-9 >= min_rr_tp2 and float(m.mid_price) < tp1:
+            tp2 = float(m.mid_price)
+            tp2_label = f"{m.kind} @{tp2:.2f} (≥1:{min_rr_tp2:g}, score={m.score:.0f})"
+            break
+    early = [a for a in magnets if float(a.mid_price) > entry - min_rr_tp1 * risk * 0.95]
+    if early:
+        e0 = early[0]
+        magnet_note = (
+            f"Partial/danger before 2R: {e0.kind} @{e0.mid_price:.2f} "
+            f"(do not treat as full TP1)"
+        )
+    if tp2 >= tp1:
+        tp2 = min(entry - min_rr_tp2 * risk, tp1 - risk * 0.5)
+        tp2_label = f"prop ≥1:{min_rr_tp2:g} @{tp2:.2f}"
+    rr1 = _rr(entry, sl, tp1, "SELL")
+    rr2 = _rr(entry, sl, tp2, "SELL")
+    return (
+        entry,
+        sl,
+        tp1,
+        tp2,
+        sl_label,
+        tp1_label,
+        tp2_label,
+        rr1,
+        rr2,
+        round(risk, 2),
+        round(entry - tp1, 2),
+        magnet_note,
+    )
 
 
 def build_manual_scan(
@@ -601,11 +667,29 @@ def build_manual_scan(
         hi = max(a.price_low, a.price_high)
         # Use full area list for opposing TP targets (not only first 12 slice peer)
         pool = trade_areas.areas if trade_areas else [a]
-        sl, tp1, tp2, sl_l, tp1_l, tp2_l, rr = _plan_sl_tp(a, pool, atr)
-        # Soft-cap A+ when R:R to zone TP1 is unclear/weak (ATR fallback often ~1.x)
-        if grade == "A+" and rr > 0 and rr < 1.5:
+        (
+            entry,
+            sl,
+            tp1,
+            tp2,
+            sl_l,
+            tp1_l,
+            tp2_l,
+            rr,
+            rr2,
+            risk_pts,
+            reward_pts,
+            magnet_note,
+        ) = _plan_sl_tp(a, pool, atr)
+        # Prop gate: A+ needs planned ≥1:2 to TP1
+        if grade == "A+" and rr > 0 and rr < 2.0:
             grade = "A"
-            reasons.append(f"Capped A+→A: R:R to TP1 only 1:{rr:.2f} (need ≥1.5)")
+            reasons.append(f"Capped A+→A: R:R to TP1 only 1:{rr:.2f} (need ≥1:2 for prop)")
+        elif grade == "A" and rr > 0 and rr < 1.8:
+            grade = "B"
+            reasons.append(f"Capped A→B: R:R to TP1 only 1:{rr:.2f} (weak for challenge)")
+        if magnet_note:
+            reasons.append(magnet_note)
         cards.append(
             SetupCard(
                 grade=grade,
@@ -628,6 +712,11 @@ def build_manual_scan(
                 tp1_label=tp1_l,
                 tp2_label=tp2_l,
                 reward_risk=rr,
+                reward_risk_tp2=rr2,
+                entry_price=entry,
+                risk_points=risk_pts,
+                reward_points=reward_pts,
+                magnet_note=magnet_note,
                 distance_atr=float(a.distance_atr),
             )
         )
@@ -804,9 +893,12 @@ def render_manual_scan_block(
         )
         for row in sc.rows:
             lines.append(f"    {row}")
+        if sc.pending_proxy:
+            lines.append(f"  Liquidity proxy: {sc.pending_proxy}")
         lines.append(f"  → {sc.advice}")
         lines.append(
-            "  Note: Grade A/B = bias filter. Board = structure strength. Use both."
+            "  Note: Grade A/B = bias filter. Board = structure strength. "
+            "Liquidity proxy ≠ real pending orders / DOM."
         )
 
     lines.append("-" * 72)
@@ -855,17 +947,30 @@ def render_manual_scan_block(
             lines.append(f"      {c.avoid}")
             if c.stop_loss > 0 and c.take_profit_1 > 0:
                 lines.append(
-                    f"      SL  : {c.stop_loss:.2f}  ({c.sl_label})"
+                    f"      ENTRY: {c.entry_price:.2f}  (zone mid — plan R:R from here)"
                 )
                 lines.append(
-                    f"      TP1 : {c.take_profit_1:.2f}  ({c.tp1_label})"
+                    f"      SL   : {c.stop_loss:.2f}  ({c.sl_label})"
+                )
+                lines.append(
+                    f"      TP1  : {c.take_profit_1:.2f}  ({c.tp1_label})"
                 )
                 if c.take_profit_2 > 0:
                     lines.append(
-                        f"      TP2 : {c.take_profit_2:.2f}  ({c.tp2_label})"
+                        f"      TP2  : {c.take_profit_2:.2f}  ({c.tp2_label})"
                     )
+                lines.append(
+                    f"      RISK : {c.risk_points:.2f} pts  |  "
+                    f"REWARD TP1: {c.reward_points:.2f} pts"
+                )
                 if c.reward_risk > 0:
-                    lines.append(f"      R:R : 1:{c.reward_risk:.2f}  (to TP1, from zone mid)")
+                    rr2 = f"  TP2 1:{c.reward_risk_tp2:.2f}" if c.reward_risk_tp2 > 0 else ""
+                    lines.append(
+                        f"      R:R  : 1:{c.reward_risk:.2f} to TP1{rr2}  "
+                        f"(prop target ≥1:2 / 1:3)"
+                    )
+                if c.magnet_note:
+                    lines.append(f"      NOTE : {c.magnet_note}")
             if not brief:
                 for t in c.confirm_on_tv[:2]:
                     lines.append(f"      TV · {t}")

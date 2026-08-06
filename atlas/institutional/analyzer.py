@@ -185,6 +185,17 @@ class InstitutionalAnalyzer:
                 ),
                 "news_detail": news.summary,
                 "news_block": bool(news.block_trading),
+                "trendlines": [
+                    {
+                        "kind": ln.kind,
+                        "quality": ln.quality,
+                        "touches": ln.touches,
+                        "price": round(float(ln.y_at_end), 2),
+                        "break_prob": round(float(ln.break_prob), 2),
+                    }
+                    for ln in (tl.lines or [])
+                    if ln.quality != "Broken"
+                ][:4],
             },
         )
 
