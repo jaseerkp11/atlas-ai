@@ -36,19 +36,43 @@ def _session_extremes(df: pd.DataFrame) -> list[LiquidityPool]:
     pools: list[LiquidityPool] = []
     if df is None or len(df) < 10 or "time" not in df.columns:
         return pools
-    # Daily H/L from last 24h of M15/H1 bars if timestamps available
     try:
-        # Prefer closed bars so forming candle does not invent session extremes
+        from atlas.institutional.session_levels import extract_session_levels
+
+        report = extract_session_levels(df)
+        kind_map = {
+            "pdh": "daily_high",
+            "pdl": "daily_low",
+            "asian_high": "daily_high",
+            "asian_low": "daily_low",
+            "london_high": "daily_high",
+            "london_low": "daily_low",
+        }
+        for lv in report.levels:
+            pools.append(
+                LiquidityPool(
+                    kind_map.get(lv.kind, "swing_high_liq" if lv.side == "SELL" else "swing_low_liq"),
+                    lv.price,
+                    lv.score,
+                    lv.label,
+                )
+            )
+        # Keep weekly rolling extremes as secondary context
         closed = df.iloc[:-1] if len(df) >= 2 else df
-        day = closed.tail(96)  # ~1 day of M15
-        pools.append(LiquidityPool("daily_high", float(day["high"].max()), 80, "Daily High"))
-        pools.append(LiquidityPool("daily_low", float(day["low"].min()), 80, "Daily Low"))
         week = closed.tail(96 * 5)
-        pools.append(LiquidityPool("weekly_high", float(week["high"].max()), 90, "Weekly High"))
-        pools.append(LiquidityPool("weekly_low", float(week["low"].min()), 90, "Weekly Low"))
+        if len(week):
+            pools.append(LiquidityPool("weekly_high", float(week["high"].max()), 90, "Weekly High"))
+            pools.append(LiquidityPool("weekly_low", float(week["low"].min()), 90, "Weekly Low"))
     except Exception:
-        pass
+        try:
+            closed = df.iloc[:-1] if len(df) >= 2 else df
+            day = closed.tail(96)
+            pools.append(LiquidityPool("daily_high", float(day["high"].max()), 80, "Daily High"))
+            pools.append(LiquidityPool("daily_low", float(day["low"].min()), 80, "Daily Low"))
+        except Exception:
+            pass
     return pools
+
 
 
 def analyze_liquidity(

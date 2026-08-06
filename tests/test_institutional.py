@@ -712,3 +712,108 @@ def test_next_m5_boundary_and_watch_helpers():
     assert "22:55" in _bar_open_time(df, -1)
     ts = _parse_bar_ts("2026-08-05 22:50:00+00:00")
     assert ts is not None and ts.minute == 50
+
+
+def test_session_levels_pdh_pdl_asian():
+    from datetime import datetime, timezone
+
+    from atlas.institutional.session_levels import extract_session_levels
+
+    rows = []
+    t0 = datetime(2026, 8, 4, 0, 0, tzinfo=timezone.utc)
+    # Prev day 4th: high 4180 low 4070
+    for h in range(24):
+        price = 4100 + h
+        hi = 4180 if h == 12 else price + 2
+        lo = 4070 if h == 3 else price - 2
+        rows.append(
+            {
+                "time": t0.replace(hour=h),
+                "open": price,
+                "high": hi,
+                "low": lo,
+                "close": price,
+                "tick_volume": 10,
+            }
+        )
+    # Today 5th asian 00-06
+    t1 = datetime(2026, 8, 5, 0, 0, tzinfo=timezone.utc)
+    for h in range(0, 7):
+        rows.append(
+            {
+                "time": t1.replace(hour=h),
+                "open": 4150,
+                "high": 4160 if h == 2 else 4152,
+                "low": 4140 if h == 4 else 4148,
+                "close": 4150,
+                "tick_volume": 10,
+            }
+        )
+    # Forming bar
+    rows.append(
+        {
+            "time": datetime(2026, 8, 5, 12, 0, tzinfo=timezone.utc),
+            "open": 4155,
+            "high": 4199,
+            "low": 4001,
+            "close": 4155,
+            "tick_volume": 10,
+        }
+    )
+    df = pd.DataFrame(rows)
+    now = datetime(2026, 8, 5, 12, 30, tzinfo=timezone.utc)
+    rep = extract_session_levels(df, now=now)
+    assert rep.pdh is not None and abs(rep.pdh - 4180) < 1e-6
+    assert rep.pdl is not None and abs(rep.pdl - 4070) < 1e-6
+    assert rep.asian_high is not None and abs(rep.asian_high - 4160) < 1e-6
+    assert rep.asian_low is not None and abs(rep.asian_low - 4140) < 1e-6
+    # Forming spike must not invent PDH
+    assert rep.pdh < 4199
+
+
+def test_focus_plan_and_sweep_state():
+    from atlas.institutional.manual_scanner import build_manual_scan, render_manual_scan_block
+    from atlas.institutional.models import MarketNarrative, utcnow
+    from atlas.institutional.trade_areas import TradeArea, TradeAreasReport
+
+    n = MarketNarrative(
+        symbol="XAUUSD",
+        as_of=utcnow(),
+        overall_bias=Bias.BULLISH,
+        htf_bias=Bias.BULLISH,
+        mtf_bias=Bias.BULLISH,
+        structure_summary="x",
+        liquidity_summary="x",
+        institutional_confluence="x",
+        sr_summary="x",
+        trend_quality="t",
+        volatility_regime="v",
+        best_session="London",
+        news_status="ok",
+        mid=4157.0,
+        atr_m15=8.0,
+        extras={"pd_zone": "discount", "sweep_bullish": True, "sweep_bearish": False},
+    )
+    buy = TradeArea(
+        "BUY", "buy_liquidity", 4150, 4154, 4152, 90, 0.6, True, ["EQL"], "EQL"
+    )
+    sell = TradeArea(
+        "SELL", "htf_resistance", 4178, 4182, 4180, 88, 2.8, True, ["H4"], "H4"
+    )
+    areas = TradeAreasReport([buy, sell], [buy], [sell], "x")
+    rep = build_manual_scan(
+        n, areas, None, Bias.BULLISH, Bias.BULLISH, Bias.BULLISH, "London"
+    )
+    assert rep.focus is not None
+    assert rep.focus.side == "BUY"
+    assert rep.focus.verdict in ("WATCH_READY", "WAIT_SWEEP", "SKIP")
+    assert any(i.name == "R:R ≥ 1:2 to TP1" for i in rep.focus.checklist)
+    assert rep.buy_cards[0].sweep_state in (
+        "WAITING_SWEEP",
+        "SWEPT",
+        "RECLAIMED",
+        "IN_ZONE",
+    )
+    text = "\n".join(render_manual_scan_block(rep, mid=4157.0))
+    assert "FOCUS TRADE" in text
+    assert "PASS" in text or "FAIL" in text

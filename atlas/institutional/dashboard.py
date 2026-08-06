@@ -27,6 +27,8 @@ def _load_report(n):
     from dataclasses import fields
 
     from atlas.institutional.manual_scanner import (
+        FocusChecklistItem,
+        FocusPlan,
         ManualScanReport,
         SetupCard,
         SideCompareBoard,
@@ -46,6 +48,25 @@ def _load_report(n):
         known = {f.name for f in fields(SideCompareBoard)}
         return SideCompareBoard(**{k: v for k, v in d.items() if k in known})
 
+    def _focus(d) -> FocusPlan | None:
+        if not isinstance(d, dict) or not d:
+            return None
+        known = {f.name for f in fields(FocusPlan)}
+        data = {k: v for k, v in d.items() if k in known}
+        raw_items = data.pop("checklist", []) or []
+        items = []
+        for it in raw_items:
+            if isinstance(it, dict):
+                items.append(
+                    FocusChecklistItem(
+                        name=str(it.get("name", "")),
+                        passed=bool(it.get("passed")),
+                        detail=str(it.get("detail", "")),
+                    )
+                )
+        data["checklist"] = items
+        return FocusPlan(**data)
+
     return ManualScanReport(
         bias=str(raw.get("bias", "")),
         stance=str(raw.get("stance", "")),
@@ -57,6 +78,7 @@ def _load_report(n):
         do_not=list(raw.get("do_not") or []),
         summary=str(raw.get("summary", "")),
         side_compare=_side_compare(raw.get("side_compare")),
+        focus=_focus(raw.get("focus")),
     )
 
 
@@ -108,6 +130,13 @@ def render_dashboard(decision: InstitutionalDecision, full: bool = True, brief: 
         pd_zone = (n.extras or {}).get("pd_zone")
         if pd_zone:
             lines.append(f"  H1 array     : {str(pd_zone).upper()}")
+        sess = (n.extras or {}).get("session_levels") or {}
+        if isinstance(sess, dict) and sess.get("summary"):
+            lines.append(f"  Session lvls : {sess.get('summary')}")
+            for lv in (sess.get("levels") or [])[:6]:
+                lines.append(
+                    f"    · {lv.get('label')}: {float(lv.get('price', 0)):.2f}"
+                )
         lines.append(f"  Overall Bias  : {n.overall_bias.value}")
         lines.append(f"  HTF stack     : H4={h4}  H1={h1} (primary)  M15={m15}")
         lines.append(f"  Trend Quality : {n.trend_quality}")

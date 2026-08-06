@@ -48,9 +48,62 @@ class SetupCard:
     reward_points: float = 0.0
     magnet_note: str = ""
     distance_atr: float = 0.0
+    # SMC sequence relative to this zone
+    sweep_state: str = "WAITING_SWEEP"  # WAITING_SWEEP | SWEPT | RECLAIMED | IN_ZONE
+    quality: float = 0.0  # 0–100 checklist-style quality
 
     def as_dict(self) -> dict:
         return asdict(self)
+
+
+@dataclass
+class FocusChecklistItem:
+    name: str
+    passed: bool
+    detail: str
+
+    def as_dict(self) -> dict:
+        return asdict(self)
+
+
+@dataclass
+class FocusPlan:
+    """Single best idea + 5-point checklist for the trader."""
+
+    side: str = ""
+    grade: str = ""
+    kind: str = ""
+    zone_low: float = 0.0
+    zone_high: float = 0.0
+    entry: float = 0.0
+    stop_loss: float = 0.0
+    take_profit_1: float = 0.0
+    take_profit_2: float = 0.0
+    reward_risk: float = 0.0
+    sweep_state: str = ""
+    quality: float = 0.0
+    verdict: str = "SKIP"  # WATCH_READY | WAIT_SWEEP | SKIP
+    checklist: list[FocusChecklistItem] = field(default_factory=list)
+    why: str = ""
+
+    def as_dict(self) -> dict:
+        return {
+            "side": self.side,
+            "grade": self.grade,
+            "kind": self.kind,
+            "zone_low": self.zone_low,
+            "zone_high": self.zone_high,
+            "entry": self.entry,
+            "stop_loss": self.stop_loss,
+            "take_profit_1": self.take_profit_1,
+            "take_profit_2": self.take_profit_2,
+            "reward_risk": self.reward_risk,
+            "sweep_state": self.sweep_state,
+            "quality": self.quality,
+            "verdict": self.verdict,
+            "checklist": [c.as_dict() for c in self.checklist],
+            "why": self.why,
+        }
 
 
 @dataclass
@@ -102,6 +155,7 @@ class ManualScanReport:
     do_not: list[str]
     summary: str
     side_compare: SideCompareBoard | None = None
+    focus: FocusPlan | None = None
 
     def as_dict(self) -> dict:
         return {
@@ -115,6 +169,7 @@ class ManualScanReport:
             "do_not": self.do_not,
             "summary": self.summary,
             "side_compare": self.side_compare.as_dict() if self.side_compare else None,
+            "focus": self.focus.as_dict() if self.focus else None,
         }
 
 
@@ -618,6 +673,176 @@ def _plan_sl_tp(
     )
 
 
+def _sweep_state_for_area(
+    area: TradeArea,
+    market_mid: float,
+    sweep_bull: bool,
+    sweep_bear: bool,
+) -> str:
+    """
+    Map price vs zone + global sweep flags into a simple SMC sequence label.
+    WAITING_SWEEP → SWEPT → RECLAIMED / IN_ZONE
+    """
+    lo = min(area.price_low, area.price_high)
+    hi = max(area.price_low, area.price_high)
+    if area.side == "BUY":
+        if market_mid < lo:
+            return "SWEPT"  # below support — need reclaim close back above
+        if lo <= market_mid <= hi:
+            return "RECLAIMED" if sweep_bull else "IN_ZONE"
+        # above zone — waiting for dip/sweep into the box
+        if sweep_bull:
+            return "RECLAIMED"
+        return "WAITING_SWEEP"
+    # SELL
+    if market_mid > hi:
+        return "SWEPT"
+    if lo <= market_mid <= hi:
+        return "RECLAIMED" if sweep_bear else "IN_ZONE"
+    if sweep_bear:
+        return "RECLAIMED"
+    return "WAITING_SWEEP"
+
+
+def _card_quality(
+    grade: str,
+    killzone: bool,
+    pd_ok: bool,
+    board_ok: bool,
+    rr: float,
+    sweep_state: str,
+    agree_stack: bool,
+) -> float:
+    q = 40.0
+    if grade == "A+":
+        q += 20
+    elif grade == "A":
+        q += 12
+    elif grade == "B":
+        q += 4
+    if killzone:
+        q += 10
+    if pd_ok:
+        q += 10
+    if board_ok:
+        q += 8
+    if rr >= 3.0:
+        q += 12
+    elif rr >= 2.0:
+        q += 8
+    elif rr >= 1.5:
+        q += 3
+    if sweep_state in ("RECLAIMED", "IN_ZONE"):
+        q += 10
+    elif sweep_state == "SWEPT":
+        q += 4
+    if agree_stack:
+        q += 6
+    return max(0.0, min(100.0, q))
+
+
+def build_focus_plan(
+    cards: list[SetupCard],
+    stance: str,
+    h1_bias: Bias,
+    killzone: bool,
+    pd_zone: str,
+    board_lean: str,
+    session_name: str,
+) -> FocusPlan | None:
+    """Pick one best with-trend card and score a 5-point prop checklist."""
+    pool = [
+        c
+        for c in cards
+        if c.status != "AVOID_NOW"
+        and (
+            (stance == "LONG_BIAS" and c.side == "BUY")
+            or (stance == "SHORT_BIAS" and c.side == "SELL")
+            or stance == "NO_EDGE"
+        )
+        and c.grade in ("A+", "A", "B")
+    ]
+    if not pool:
+        return None
+    pool.sort(key=lambda c: (-c.quality, {"A+": 0, "A": 1, "B": 2}.get(c.grade, 9), c.distance_atr))
+    c = pool[0]
+
+    bias_ok = (c.side == "BUY" and h1_bias == Bias.BULLISH) or (
+        c.side == "SELL" and h1_bias == Bias.BEARISH
+    )
+    if c.side == "BUY":
+        pd_ok = pd_zone in ("discount", "equilibrium", "")
+        pd_detail = f"H1 array={pd_zone or '?'} (want discount/eq for buys)"
+    else:
+        pd_ok = pd_zone in ("premium", "equilibrium", "")
+        pd_detail = f"H1 array={pd_zone or '?'} (want premium/eq for sells)"
+
+    if stance == "LONG_BIAS":
+        board_ok = board_lean != "SELL_LEAN"
+        board_detail = f"board={board_lean} (SELL_LEAN = correction risk)"
+    elif stance == "SHORT_BIAS":
+        board_ok = board_lean != "BUY_LEAN"
+        board_detail = f"board={board_lean} (BUY_LEAN = bounce risk)"
+    else:
+        board_ok = True
+        board_detail = f"board={board_lean}"
+
+    rr_ok = c.reward_risk >= 2.0
+    sweep_ok = c.sweep_state in ("RECLAIMED", "IN_ZONE")
+
+    checklist = [
+        FocusChecklistItem("H1 bias aligned", bias_ok, f"side={c.side} H1={h1_bias.value}"),
+        FocusChecklistItem("Premium/Discount OK", pd_ok, pd_detail),
+        FocusChecklistItem("Killzone session", killzone, f"session={session_name}"),
+        FocusChecklistItem("Board not fighting", board_ok, board_detail),
+        FocusChecklistItem("R:R ≥ 1:2 to TP1", rr_ok, f"R:R=1:{c.reward_risk:.2f}"),
+        FocusChecklistItem(
+            "Sweep/reclaim state",
+            sweep_ok or c.sweep_state == "WAITING_SWEEP",
+            f"state={c.sweep_state} (need RECLAIMED/IN_ZONE to enter)",
+        ),
+    ]
+    core = [checklist[0], checklist[1], checklist[3], checklist[4]]
+    core_pass = all(i.passed for i in core)
+
+    if not bias_ok or not rr_ok:
+        verdict = "SKIP"
+        why = "Fail core filter (bias or R:R) — map only, do not take."
+    elif not core_pass:
+        verdict = "SKIP"
+        why = "Checklist incomplete — wait for PD/board alignment."
+    elif c.sweep_state == "WAITING_SWEEP":
+        verdict = "WAIT_SWEEP"
+        why = "Plan is valid — wait for sweep into zone then reclaim before entry."
+    elif c.sweep_state == "SWEPT":
+        verdict = "WAIT_SWEEP"
+        why = "Liquidity taken — wait for reclaim close back through the zone."
+    elif not killzone:
+        verdict = "WATCH_READY"
+        why = "Checklist mostly OK but outside killzone — reduce size or wait London/NY."
+    else:
+        verdict = "WATCH_READY"
+        why = "FOCUS ready: wait CONFIRM candle on TradingView, then decide."
+
+    return FocusPlan(
+        side=c.side,
+        grade=c.grade,
+        kind=c.kind,
+        zone_low=min(c.zone_low, c.zone_high),
+        zone_high=max(c.zone_low, c.zone_high),
+        entry=c.entry_price or c.focus_price,
+        stop_loss=c.stop_loss,
+        take_profit_1=c.take_profit_1,
+        take_profit_2=c.take_profit_2,
+        reward_risk=c.reward_risk,
+        sweep_state=c.sweep_state,
+        quality=c.quality,
+        verdict=verdict,
+        checklist=checklist,
+        why=why,
+    )
+
+
 def build_manual_scan(
     narrative: MarketNarrative,
     trade_areas: TradeAreasReport | None,
@@ -690,6 +915,19 @@ def build_manual_scan(
             reasons.append(f"Capped A→B: R:R to TP1 only 1:{rr:.2f} (weak for challenge)")
         if magnet_note:
             reasons.append(magnet_note)
+        sweep_bull = bool((narrative.extras or {}).get("sweep_bullish"))
+        sweep_bear = bool((narrative.extras or {}).get("sweep_bearish"))
+        sweep_state = _sweep_state_for_area(a, market_mid, sweep_bull, sweep_bear)
+        pd_zone_now = str((narrative.extras or {}).get("pd_zone", "") or "")
+        if a.side == "BUY":
+            pd_ok = pd_zone_now in ("discount", "equilibrium", "")
+        else:
+            pd_ok = pd_zone_now in ("premium", "equilibrium", "")
+        # Board lean unknown until after cards; approximate with H1 for quality seed
+        board_ok_seed = status != "AVOID_NOW"
+        quality = _card_quality(
+            grade, killzone, pd_ok, board_ok_seed, rr, sweep_state, agree_stack
+        )
         cards.append(
             SetupCard(
                 grade=grade,
@@ -718,6 +956,8 @@ def build_manual_scan(
                 reward_points=reward_pts,
                 magnet_note=magnet_note,
                 distance_atr=float(a.distance_atr),
+                sweep_state=sweep_state,
+                quality=quality,
             )
         )
 
@@ -850,6 +1090,39 @@ def build_manual_scan(
             "BOARD: buy pressure > sell — bounce risk; skip forcing shorts",
         )
 
+    # Recompute quality with real board lean, then build FOCUS plan
+    for c in cards:
+        if c.side == "BUY":
+            pd_ok = pd_zone in ("discount", "equilibrium", "")
+            board_ok = side_compare.lean != "SELL_LEAN"
+        else:
+            pd_ok = pd_zone in ("premium", "equilibrium", "")
+            board_ok = side_compare.lean != "BUY_LEAN"
+        c.quality = _card_quality(
+            c.grade,
+            killzone,
+            pd_ok,
+            board_ok or c.status == "AVOID_NOW",
+            c.reward_risk,
+            c.sweep_state,
+            agree_stack,
+        )
+
+    focus = build_focus_plan(
+        cards,
+        stance,
+        h1_bias,
+        killzone,
+        pd_zone,
+        side_compare.lean,
+        session_name,
+    )
+    if focus:
+        summary = (
+            f"{summary} | FOCUS={focus.verdict} Q={focus.quality:.0f} "
+            f"{focus.side}@{focus.entry:.2f}"
+        )
+
     return ManualScanReport(
         bias=h1_bias.value,
         stance=stance,
@@ -861,6 +1134,7 @@ def build_manual_scan(
         do_not=do_not,
         summary=summary,
         side_compare=side_compare,
+        focus=focus,
     )
 
 
@@ -882,6 +1156,25 @@ def render_manual_scan_block(
     lines.append(f"  Stance   : {report.stance}  (H1={report.bias})")
     lines.append(f"  Plan     : {report.headline}")
     lines.append(f"  Snapshot : {report.summary}")
+
+    fp = report.focus
+    if fp is not None and fp.side:
+        lines.append("-" * 72)
+        lines.append("  FOCUS TRADE  (one idea — confirm on TradingView)")
+        lines.append(
+            f"  Verdict={fp.verdict}  Quality={fp.quality:.0f}/100  "
+            f"[{fp.grade}] {fp.side} {fp.kind}  sweep={fp.sweep_state}"
+        )
+        lines.append(
+            f"  Zone {fp.zone_low:.2f}-{fp.zone_high:.2f}  |  "
+            f"ENTRY {fp.entry:.2f}  SL {fp.stop_loss:.2f}  "
+            f"TP1 {fp.take_profit_1:.2f}  TP2 {fp.take_profit_2:.2f}  "
+            f"R:R 1:{fp.reward_risk:.2f}"
+        )
+        for item in fp.checklist:
+            mark = "PASS" if item.passed else "FAIL"
+            lines.append(f"    [{mark}] {item.name} — {item.detail}")
+        lines.append(f"  → {fp.why}")
 
     sc = report.side_compare
     if sc is not None:
@@ -938,7 +1231,8 @@ def render_manual_scan_block(
             lines.append(
                 f"  {i}. [{c.grade}] {c.side}  {lo:.2f}-{hi:.2f}  "
                 f"@{c.focus_price:.2f}  {c.kind}  score={c.score:.0f}  "
-                f"dist={c.distance_atr:.2f}ATR  {c.status}"
+                f"Q={c.quality:.0f}  dist={c.distance_atr:.2f}ATR  "
+                f"sweep={c.sweep_state}  {c.status}"
             )
             parts = [p.strip() for p in c.if_then.split("|")]
             for p in parts:

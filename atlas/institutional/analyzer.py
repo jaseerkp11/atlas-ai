@@ -107,6 +107,9 @@ class InstitutionalAnalyzer:
             lookback=lookback,
             equal_tol_atr=float(self.cfg.analysis.get("equal_level_tolerance_atr", 0.15)),
         )
+        from atlas.institutional.session_levels import extract_session_levels
+
+        session_lv = extract_session_levels(setup_df if setup_df is not None else m5)
         sr = analyze_support_resistance(symbol, frames, mid, atr or 1.0)
         fvg = analyze_fvg(setup_df, mid)
         ob = analyze_order_blocks(setup_df, mid)
@@ -185,6 +188,9 @@ class InstitutionalAnalyzer:
                 ),
                 "news_detail": news.summary,
                 "news_block": bool(news.block_trading),
+                "session_levels": session_lv.as_dict(),
+                "sweep_bullish": bool(liq.sweep_bullish),
+                "sweep_bearish": bool(liq.sweep_bearish),
                 "trendlines": [
                     {
                         "kind": ln.kind,
