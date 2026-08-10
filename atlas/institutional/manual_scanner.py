@@ -680,27 +680,27 @@ def _sweep_state_for_area(
     sweep_bear: bool,
 ) -> str:
     """
-    Map price vs zone + global sweep flags into a simple SMC sequence label.
-    WAITING_SWEEP → SWEPT → RECLAIMED / IN_ZONE
+    Zone-local SMC sequence from price vs this box only.
+
+    Global sweep flags are context only — they must NOT mark a distant
+    magnet as RECLAIMED (that caused false WATCH_READY).
+    WAITING_SWEEP → SWEPT → IN_ZONE (enter only after confirm in/near box).
     """
     lo = min(area.price_low, area.price_high)
     hi = max(area.price_low, area.price_high)
+    # Unused on purpose for zone-local state (kept in signature for callers)
+    _ = (sweep_bull, sweep_bear)
     if area.side == "BUY":
         if market_mid < lo:
-            return "SWEPT"  # below support — need reclaim close back above
+            return "SWEPT"  # below support — need reclaim back into/above box
         if lo <= market_mid <= hi:
-            return "RECLAIMED" if sweep_bull else "IN_ZONE"
-        # above zone — waiting for dip/sweep into the box
-        if sweep_bull:
-            return "RECLAIMED"
-        return "WAITING_SWEEP"
+            return "IN_ZONE"
+        return "WAITING_SWEEP"  # still above — wait for dip into the box
     # SELL
     if market_mid > hi:
         return "SWEPT"
     if lo <= market_mid <= hi:
-        return "RECLAIMED" if sweep_bear else "IN_ZONE"
-    if sweep_bear:
-        return "RECLAIMED"
+        return "IN_ZONE"
     return "WAITING_SWEEP"
 
 
@@ -798,8 +798,8 @@ def build_focus_plan(
         FocusChecklistItem("R:R ≥ 1:2 to TP1", rr_ok, f"R:R=1:{c.reward_risk:.2f}"),
         FocusChecklistItem(
             "Sweep/reclaim state",
-            sweep_ok or c.sweep_state == "WAITING_SWEEP",
-            f"state={c.sweep_state} (need RECLAIMED/IN_ZONE to enter)",
+            sweep_ok,
+            f"state={c.sweep_state} (PASS only if IN_ZONE or RECLAIMED — not WAITING_SWEEP)",
         ),
     ]
     core = [checklist[0], checklist[1], checklist[3], checklist[4]]

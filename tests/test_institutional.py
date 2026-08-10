@@ -806,14 +806,12 @@ def test_focus_plan_and_sweep_state():
     )
     assert rep.focus is not None
     assert rep.focus.side == "BUY"
-    assert rep.focus.verdict in ("WATCH_READY", "WAIT_SWEEP", "SKIP")
+    # Mid above buy zone → must wait for dip (global sweep flag must not fake RECLAIMED)
+    assert rep.buy_cards[0].sweep_state == "WAITING_SWEEP"
+    assert rep.focus.verdict == "WAIT_SWEEP"
+    sweep_item = next(i for i in rep.focus.checklist if i.name.startswith("Sweep"))
+    assert sweep_item.passed is False
     assert any(i.name == "R:R ≥ 1:2 to TP1" for i in rep.focus.checklist)
-    assert rep.buy_cards[0].sweep_state in (
-        "WAITING_SWEEP",
-        "SWEPT",
-        "RECLAIMED",
-        "IN_ZONE",
-    )
     text = "\n".join(render_manual_scan_block(rep, mid=4157.0))
     assert "FOCUS TRADE" in text
     assert "PASS" in text or "FAIL" in text

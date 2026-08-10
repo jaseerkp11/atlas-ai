@@ -98,8 +98,14 @@ def evaluate_playbooks(
     struct = _mod(modules, "market_structure")
     pa = _mod(modules, "price_action")
     detail_s = (struct.detail or "") if struct else ""
-    in_discount = "discount" in detail_s
-    in_premium = "premium" in detail_s
+    # Prefer H1 pd_zone from analyzer extras so playbook matches FOCUS checklist
+    pd = str((narrative.extras or {}).get("pd_zone") or "")
+    if pd in ("discount", "premium", "equilibrium"):
+        in_discount = pd == "discount"
+        in_premium = pd == "premium"
+    else:
+        in_discount = "discount" in detail_s
+        in_premium = "premium" in detail_s
 
     # --- 1) Liquidity Sweep + Reclaim ---
     if liq and "sweep=bull" in (liq.detail or ""):
