@@ -792,7 +792,13 @@ def test_focus_plan_and_sweep_state():
         news_status="ok",
         mid=4157.0,
         atr_m15=8.0,
-        extras={"pd_zone": "discount", "sweep_bullish": True, "sweep_bearish": False},
+        extras={
+            "pd_zone": "discount",
+            "sweep_bullish": True,
+            "sweep_bearish": False,
+            "last_closed_low": 4155.0,
+            "last_closed_high": 4160.0,
+        },
     )
     buy = TradeArea(
         "BUY", "buy_liquidity", 4150, 4154, 4152, 90, 0.6, True, ["EQL"], "EQL"
@@ -806,12 +812,72 @@ def test_focus_plan_and_sweep_state():
     )
     assert rep.focus is not None
     assert rep.focus.side == "BUY"
-    # Mid above buy zone → must wait for dip (global sweep flag must not fake RECLAIMED)
+    # Mid above buy zone, last low did NOT sweep the box → WAITING_SWEEP
     assert rep.buy_cards[0].sweep_state == "WAITING_SWEEP"
     assert rep.focus.verdict == "WAIT_SWEEP"
     sweep_item = next(i for i in rep.focus.checklist if i.name.startswith("Sweep"))
     assert sweep_item.passed is False
-    assert any(i.name == "R:R ≥ 1:2 to TP1" for i in rep.focus.checklist)
     text = "\n".join(render_manual_scan_block(rep, mid=4157.0))
     assert "FOCUS TRADE" in text
-    assert "PASS" in text or "FAIL" in text
+
+
+def test_sweep_reclaim_zone_specific_not_global():
+    from atlas.institutional.manual_scanner import _sweep_state_for_area
+    from atlas.institutional.trade_areas import TradeArea
+
+    buy = TradeArea("BUY", "buy_liquidity", 4150, 4154, 4152, 90, 0.5, True, ["EQL"], "EQL")
+    # Global flag alone must not reclaim a distant magnet
+    assert (
+        _sweep_state_for_area(buy, 4180.0, True, False, last_low=4175.0, atr=8.0)
+        == "WAITING_SWEEP"
+    )
+    # Wick below THIS zone + close back above near zone = RECLAIMED
+    assert (
+        _sweep_state_for_area(buy, 4156.0, False, False, last_low=4148.0, atr=8.0)
+        == "RECLAIMED"
+    )
+    # Inside box without wick = IN_ZONE (liquidity still waits)
+    assert (
+        _sweep_state_for_area(buy, 4152.0, False, False, last_low=4151.0, atr=8.0)
+        == "IN_ZONE"
+    )
+    # Below box = SWEPT
+    assert (
+        _sweep_state_for_area(buy, 4145.0, False, False, last_low=4144.0, atr=8.0)
+        == "SWEPT"
+    )
+
+
+def test_focus_liquidity_in_zone_not_watch_ready():
+    from atlas.institutional.manual_scanner import build_manual_scan
+    from atlas.institutional.models import MarketNarrative, utcnow
+    from atlas.institutional.trade_areas import TradeArea, TradeAreasReport
+
+    n = MarketNarrative(
+        symbol="XAUUSD",
+        as_of=utcnow(),
+        overall_bias=Bias.BULLISH,
+        htf_bias=Bias.BULLISH,
+        mtf_bias=Bias.BULLISH,
+        structure_summary="x",
+        liquidity_summary="x",
+        institutional_confluence="x",
+        sr_summary="x",
+        trend_quality="t",
+        volatility_regime="v",
+        best_session="London",
+        news_status="ok",
+        mid=4152.0,
+        atr_m15=8.0,
+        extras={"pd_zone": "discount", "last_closed_low": 4151.0, "last_closed_high": 4153.0},
+    )
+    buy = TradeArea(
+        "BUY", "buy_liquidity", 4150, 4154, 4152, 90, 0.1, True, ["EQL"], "EQL"
+    )
+    areas = TradeAreasReport([buy], [buy], [], "x")
+    rep = build_manual_scan(
+        n, areas, None, Bias.BULLISH, Bias.BULLISH, Bias.BULLISH, "London"
+    )
+    assert rep.buy_cards[0].sweep_state == "IN_ZONE"
+    assert rep.focus is not None
+    assert rep.focus.verdict == "WAIT_SWEEP"

@@ -191,6 +191,16 @@ class InstitutionalAnalyzer:
                 "session_levels": session_lv.as_dict(),
                 "sweep_bullish": bool(liq.sweep_bullish),
                 "sweep_bearish": bool(liq.sweep_bearish),
+                "last_closed_low": (
+                    float(price_df["low"].iloc[-2])
+                    if price_df is not None and len(price_df) >= 2
+                    else None
+                ),
+                "last_closed_high": (
+                    float(price_df["high"].iloc[-2])
+                    if price_df is not None and len(price_df) >= 2
+                    else None
+                ),
                 "trendlines": [
                     {
                         "kind": ln.kind,

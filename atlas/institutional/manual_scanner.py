@@ -676,31 +676,44 @@ def _plan_sl_tp(
 def _sweep_state_for_area(
     area: TradeArea,
     market_mid: float,
-    sweep_bull: bool,
-    sweep_bear: bool,
+    sweep_bull: bool = False,
+    sweep_bear: bool = False,
+    last_low: float | None = None,
+    last_high: float | None = None,
+    atr: float = 1.0,
 ) -> str:
     """
-    Zone-local SMC sequence from price vs this box only.
+    Zone-local SMC sequence:
+      WAITING_SWEEP → SWEPT → RECLAIMED / IN_ZONE
 
-    Global sweep flags are context only — they must NOT mark a distant
-    magnet as RECLAIMED (that caused false WATCH_READY).
-    WAITING_SWEEP → SWEPT → IN_ZONE (enter only after confirm in/near box).
+    RECLAIMED requires a wick beyond THIS zone on the last closed bar
+    (not a global unrelated swing sweep).
     """
     lo = min(area.price_low, area.price_high)
     hi = max(area.price_low, area.price_high)
-    # Unused on purpose for zone-local state (kept in signature for callers)
-    _ = (sweep_bull, sweep_bear)
+    atr = max(float(atr), 1e-9)
+    zone_mid = (lo + hi) / 2.0
+    near = abs(market_mid - zone_mid) / atr <= 2.5
+    _ = (sweep_bull, sweep_bear)  # reserved / dashboard context only
+
     if area.side == "BUY":
+        wicked_below = last_low is not None and float(last_low) < lo
         if market_mid < lo:
-            return "SWEPT"  # below support — need reclaim back into/above box
+            return "SWEPT"
         if lo <= market_mid <= hi:
-            return "IN_ZONE"
-        return "WAITING_SWEEP"  # still above — wait for dip into the box
-    # SELL
+            return "RECLAIMED" if wicked_below else "IN_ZONE"
+        # Above the box: only RECLAIMED if this zone was wicked and price is back near
+        if wicked_below and market_mid >= lo and near:
+            return "RECLAIMED"
+        return "WAITING_SWEEP"
+
+    wicked_above = last_high is not None and float(last_high) > hi
     if market_mid > hi:
         return "SWEPT"
     if lo <= market_mid <= hi:
-        return "IN_ZONE"
+        return "RECLAIMED" if wicked_above else "IN_ZONE"
+    if wicked_above and market_mid <= hi and near:
+        return "RECLAIMED"
     return "WAITING_SWEEP"
 
 
@@ -788,7 +801,12 @@ def build_focus_plan(
         board_detail = f"board={board_lean}"
 
     rr_ok = c.reward_risk >= 2.0
-    sweep_ok = c.sweep_state in ("RECLAIMED", "IN_ZONE")
+    needs_liq_reclaim = c.kind in ("buy_liquidity", "sell_liquidity")
+    # Liquidity ideas need true reclaim; tap zones can use IN_ZONE
+    if needs_liq_reclaim:
+        sweep_ok = c.sweep_state == "RECLAIMED"
+    else:
+        sweep_ok = c.sweep_state in ("RECLAIMED", "IN_ZONE")
 
     checklist = [
         FocusChecklistItem("H1 bias aligned", bias_ok, f"side={c.side} H1={h1_bias.value}"),
@@ -799,7 +817,14 @@ def build_focus_plan(
         FocusChecklistItem(
             "Sweep/reclaim state",
             sweep_ok,
-            f"state={c.sweep_state} (PASS only if IN_ZONE or RECLAIMED — not WAITING_SWEEP)",
+            (
+                f"state={c.sweep_state} "
+                + (
+                    "(liquidity: need RECLAIMED after sweep)"
+                    if needs_liq_reclaim
+                    else "(PASS if IN_ZONE or RECLAIMED)"
+                )
+            ),
         ),
     ]
     core = [checklist[0], checklist[1], checklist[3], checklist[4]]
@@ -813,10 +838,16 @@ def build_focus_plan(
         why = "Checklist incomplete — wait for PD/board alignment."
     elif c.sweep_state == "WAITING_SWEEP":
         verdict = "WAIT_SWEEP"
-        why = "Plan is valid — wait for sweep into zone then reclaim before entry."
+        why = "Plan is valid — wait for price to tag/sweep the zone first."
     elif c.sweep_state == "SWEPT":
         verdict = "WAIT_SWEEP"
         why = "Liquidity taken — wait for reclaim close back through the zone."
+    elif needs_liq_reclaim and c.sweep_state == "IN_ZONE":
+        verdict = "WAIT_SWEEP"
+        why = "Inside liquidity box but no sweep wick yet — wait sweep + reclaim."
+    elif not sweep_ok:
+        verdict = "WAIT_SWEEP"
+        why = "Sweep/reclaim not complete — do not enter yet."
     elif not killzone:
         verdict = "WATCH_READY"
         why = "Checklist mostly OK but outside killzone — reduce size or wait London/NY."
@@ -917,7 +948,25 @@ def build_manual_scan(
             reasons.append(magnet_note)
         sweep_bull = bool((narrative.extras or {}).get("sweep_bullish"))
         sweep_bear = bool((narrative.extras or {}).get("sweep_bearish"))
-        sweep_state = _sweep_state_for_area(a, market_mid, sweep_bull, sweep_bear)
+        last_low = (narrative.extras or {}).get("last_closed_low")
+        last_high = (narrative.extras or {}).get("last_closed_high")
+        try:
+            last_low_f = float(last_low) if last_low is not None else None
+        except (TypeError, ValueError):
+            last_low_f = None
+        try:
+            last_high_f = float(last_high) if last_high is not None else None
+        except (TypeError, ValueError):
+            last_high_f = None
+        sweep_state = _sweep_state_for_area(
+            a,
+            market_mid,
+            sweep_bull,
+            sweep_bear,
+            last_low=last_low_f,
+            last_high=last_high_f,
+            atr=atr,
+        )
         pd_zone_now = str((narrative.extras or {}).get("pd_zone", "") or "")
         if a.side == "BUY":
             pd_ok = pd_zone_now in ("discount", "equilibrium", "")
