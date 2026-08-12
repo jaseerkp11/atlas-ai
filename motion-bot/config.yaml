@@ -1,0 +1,31 @@
+# Motion X Engagement Bot configuration
+
+interval_seconds: 60
+max_post_length: 280
+dry_run: true
+
+# Always include these signals so Motion can index the post
+required_tags:
+  - "$MOTION"
+  - "@Motiontip"
+  - "@tipmotion"
+
+motion_url: "https://motion.tips"
+tip_bot: "@tipmotion"
+official_account: "@Motiontip"
+
+# Tier / community accounts to rotate into posts (edit with real handles)
+tier_tags:
+  elite:
+    - "@Motiontip"
+  builders:
+    - "@tipmotion"
+  community: []
+
+# How often (1 in N posts) to include the tip howto block
+howto_every_n_posts: 5
+
+# Keep this many recent post hashes to avoid repeats
+history_size: 500
+
+data_dir: "data"
