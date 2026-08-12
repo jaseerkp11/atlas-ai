@@ -43,15 +43,28 @@ class InstitutionalConfig:
     def is_paper(self) -> bool:
         return self.mode.upper() == "PAPER"
 
+    def challenge_px_value(self) -> float:
+        """
+        USD P/L per $1 price move at the configured challenge lot.
+
+        Prefer usd_per_dollar_move_at_lot (broker quote for 0.1 lot = $10).
+        Fallback: usd_per_price_unit_per_lot * lot_size.
+        """
+        ch = self.challenge or {}
+        raw = ch.get("usd_per_dollar_move_at_lot")
+        if raw is not None:
+            return max(float(raw), 1e-9)
+        lot = max(float(ch.get("lot_size", 0.1)), 1e-9)
+        per_lot = max(float(ch.get("usd_per_price_unit_per_lot", 100.0)), 1e-9)
+        return per_lot * lot
+
     def challenge_max_risk_points(self) -> float:
         """Price distance ($) for max_risk_usd at configured lot size."""
         ch = self.challenge or {}
         if not ch.get("enabled", True):
             return 1e9
-        lot = max(float(ch.get("lot_size", 0.1)), 1e-9)
         max_usd = float(ch.get("max_risk_usd", 50.0))
-        per_lot = max(float(ch.get("usd_per_price_unit_per_lot", 100.0)), 1e-9)
-        return max_usd / (per_lot * lot)
+        return max_usd / self.challenge_px_value()
 
 
 _CFG: InstitutionalConfig | None = None

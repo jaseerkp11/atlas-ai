@@ -16,6 +16,11 @@ from dataclasses import asdict, dataclass, field
 
 from atlas.institutional.models import Bias, MarketNarrative
 from atlas.institutional.playbook_engine import PlaybookResult
+from atlas.institutional.setup_probability import (
+    SetupProbability,
+    grade_from_probability,
+    score_setup_probability,
+)
 from atlas.institutional.trade_areas import TradeArea, TradeAreasReport
 
 
@@ -50,12 +55,16 @@ class SetupCard:
     distance_atr: float = 0.0
     # SMC sequence relative to this zone
     sweep_state: str = "WAITING_SWEEP"  # WAITING_SWEEP | SWEPT | RECLAIMED | IN_ZONE
-    quality: float = 0.0  # 0–100 checklist-style quality
+    quality: float = 0.0  # 0–100 = multi-factor probability
     challenge_ok: bool = True
     risk_usd: float = 0.0
     reward_usd_tp1: float = 0.0
     reward_usd_tp2: float = 0.0
     lot_size: float = 0.1
+    probability: float = 0.0
+    prob_tier: str = "LOW"
+    prob_summary: str = ""
+    prob_factors: list[str] = field(default_factory=list)
 
     def as_dict(self) -> dict:
         return asdict(self)
@@ -833,13 +842,15 @@ def build_focus_plan(
     pd_zone: str,
     board_lean: str,
     session_name: str,
+    min_probability: float = 70.0,
 ) -> FocusPlan | None:
-    """Pick one best with-trend card and score a 5-point prop checklist."""
+    """Pick one best with-trend high-prob card and score a prop checklist."""
     pool = [
         c
         for c in cards
         if c.status != "AVOID_NOW"
         and c.challenge_ok
+        and c.probability >= min_probability
         and (
             (stance == "LONG_BIAS" and c.side == "BUY")
             or (stance == "SHORT_BIAS" and c.side == "SELL")
@@ -848,7 +859,20 @@ def build_focus_plan(
         and c.grade in ("A+", "A", "B")
     ]
     if not pool:
-        # Fall back without challenge_ok so user still sees a map
+        # Fall back: challenge_ok + any grade (still prefer high prob via sort)
+        pool = [
+            c
+            for c in cards
+            if c.status != "AVOID_NOW"
+            and c.challenge_ok
+            and (
+                (stance == "LONG_BIAS" and c.side == "BUY")
+                or (stance == "SHORT_BIAS" and c.side == "SELL")
+                or stance == "NO_EDGE"
+            )
+            and c.grade in ("A+", "A", "B")
+        ]
+    if not pool:
         pool = [
             c
             for c in cards
@@ -865,6 +889,8 @@ def build_focus_plan(
     pool.sort(
         key=lambda c: (
             0 if c.challenge_ok else 1,
+            0 if c.probability >= min_probability else 1,
+            -c.probability,
             -c.quality,
             {"A+": 0, "A": 1, "B": 2}.get(c.grade, 9),
             c.distance_atr,
@@ -894,12 +920,12 @@ def build_focus_plan(
 
     rr_ok = c.reward_risk >= 2.0
     needs_liq_reclaim = c.kind in ("buy_liquidity", "sell_liquidity")
-    # Liquidity ideas need true reclaim; tap zones can use IN_ZONE
     if needs_liq_reclaim:
         sweep_ok = c.sweep_state == "RECLAIMED"
     else:
         sweep_ok = c.sweep_state in ("RECLAIMED", "IN_ZONE")
 
+    high_prob = c.probability >= min_probability
     checklist = [
         FocusChecklistItem("H1 bias aligned", bias_ok, f"side={c.side} H1={h1_bias.value}"),
         FocusChecklistItem("Premium/Discount OK", pd_ok, pd_detail),
@@ -910,6 +936,11 @@ def build_focus_plan(
             "Challenge risk fit",
             c.challenge_ok,
             f"0.1 lot risk≈${c.risk_usd:.0f} (max $50) | TP1≈${c.reward_usd_tp1:.0f} TP2≈${c.reward_usd_tp2:.0f}",
+        ),
+        FocusChecklistItem(
+            f"High-prob ≥{min_probability:.0f}",
+            high_prob,
+            f"{c.prob_tier} {c.probability:.0f}/100 — {c.prob_summary}",
         ),
         FocusChecklistItem(
             "Sweep/reclaim state",
@@ -924,6 +955,7 @@ def build_focus_plan(
             ),
         ),
     ]
+    # Core without killzone / sweep / high-prob — those gate readiness separately
     core = [checklist[0], checklist[1], checklist[3], checklist[4], checklist[5]]
     core_pass = all(i.passed for i in core)
 
@@ -938,7 +970,9 @@ def build_focus_plan(
         why = "Checklist incomplete — wait for PD/board alignment."
     elif c.sweep_state == "WAITING_SWEEP":
         verdict = "WAIT_SWEEP"
-        why = "Plan is valid — wait for price to tag/sweep the zone first."
+        why = (
+            f"Plan building (PROB {c.probability:.0f}) — wait for price to tag/sweep the zone."
+        )
     elif c.sweep_state == "SWEPT":
         verdict = "WAIT_SWEEP"
         why = "Liquidity taken — wait for reclaim close back through the zone."
@@ -948,18 +982,25 @@ def build_focus_plan(
     elif not sweep_ok:
         verdict = "WAIT_SWEEP"
         why = "Sweep/reclaim not complete — do not enter yet."
+    elif not high_prob:
+        verdict = "SKIP"
+        why = (
+            f"Sweep ok but probability {c.probability:.0f} < {min_probability:.0f} — "
+            "wait for more chart factors (PD/session/playbook/killzone) before entry."
+        )
     elif not killzone:
         verdict = "WATCH_READY"
         why = (
-            f"Ready (reduce size off-killzone). Lot 0.1 | risk≈${c.risk_usd:.0f} | "
-            f"TP1≈${c.reward_usd_tp1:.0f} (1:2) | TP2≈${c.reward_usd_tp2:.0f} (1:3)."
+            f"High-prob ({c.probability:.0f}) ready — reduce size off-killzone. "
+            f"Lot 0.1 | risk≈${c.risk_usd:.0f} | TP1≈${c.reward_usd_tp1:.0f} | "
+            f"TP2≈${c.reward_usd_tp2:.0f}."
         )
     else:
         verdict = "WATCH_READY"
         why = (
-            f"FOCUS ready @ 0.1 lot. Risk≈${c.risk_usd:.0f} → "
-            f"TP1≈${c.reward_usd_tp1:.0f} / TP2≈${c.reward_usd_tp2:.0f}. "
-            "Confirm M5 on TradingView, then decide."
+            f"FOCUS high-prob {c.probability:.0f}/100 ({c.prob_tier}) @ 0.1 lot. "
+            f"Risk≈${c.risk_usd:.0f} → TP1≈${c.reward_usd_tp1:.0f} / "
+            f"TP2≈${c.reward_usd_tp2:.0f}. Confirm M5 on TradingView."
         )
 
     return FocusPlan(
@@ -974,7 +1015,7 @@ def build_focus_plan(
         take_profit_2=c.take_profit_2,
         reward_risk=c.reward_risk,
         sweep_state=c.sweep_state,
-        quality=c.quality,
+        quality=c.probability if c.probability > 0 else c.quality,
         verdict=verdict,
         checklist=checklist,
         why=why,
@@ -996,11 +1037,15 @@ def build_manual_scan(
     ch = cfg.challenge or {}
     ch_on = bool(ch.get("enabled", True))
     lot_size = float(ch.get("lot_size", 0.1))
-    usd_per = float(ch.get("usd_per_price_unit_per_lot", 100.0))
+    # Broker: usd P/L per $1 move at challenge lot (e.g. 0.1 lot = $10)
+    px_at_lot = float(cfg.challenge_px_value()) if ch_on else 10.0
+    # _plan_sl_tp expects per-1.0-lot multiplier: usd_at_lot / lot_size
+    usd_per = px_at_lot / max(lot_size, 1e-9)
     max_risk_pts = cfg.challenge_max_risk_points() if ch_on else None
     min_rr1 = float(ch.get("min_rr_tp1", 2.0))
     min_rr2 = float(ch.get("min_rr_tp2", 3.0))
     prefer_dist = float(ch.get("prefer_distance_atr", 1.2))
+    min_focus_prob = float(ch.get("min_focus_probability", 70.0))
     _ = float(ch.get("max_zone_width_atr", 1.25))  # reserved for future soft filter
 
     killzone = session_name in ("London", "NewYork", "London-NY Overlap")
@@ -1134,16 +1179,26 @@ def build_manual_scan(
             last_high=last_high_f,
             atr=atr,
         )
-        pd_zone_now = str((narrative.extras or {}).get("pd_zone", "") or "")
-        if plan_area.side == "BUY":
-            pd_ok = pd_zone_now in ("discount", "equilibrium", "")
-        else:
-            pd_ok = pd_zone_now in ("premium", "equilibrium", "")
-        # Board lean unknown until after cards; approximate with H1 for quality seed
-        board_ok_seed = status != "AVOID_NOW"
-        quality = _card_quality(
-            grade, killzone, pd_ok, board_ok_seed, rr, sweep_state, agree_stack
+        against = status == "AVOID_NOW"
+        prob = score_setup_probability(
+            plan_area,
+            narrative=narrative,
+            h1_bias=h1_bias,
+            h4_bias=h4_bias,
+            m15_bias=m15_bias,
+            session_name=session_name,
+            sweep_state=sweep_state,
+            reward_risk=rr,
+            challenge_ok=challenge_ok,
+            playbooks=playbooks,
+            board_lean="BALANCED",
+            against_htf=against,
         )
+        grade = grade_from_probability(grade, status, prob, challenge_ok)
+        factor_lines = [
+            f"{'+' if f.passed else '-'} {f.name} ({f.points:.0f}/{f.max_points:.0f}) {f.detail}"
+            for f in sorted(prob.factors, key=lambda x: -x.points)[:6]
+        ]
         cards.append(
             SetupCard(
                 grade=grade,
@@ -1173,16 +1228,20 @@ def build_manual_scan(
                 magnet_note=magnet_note,
                 distance_atr=float(plan_area.distance_atr),
                 sweep_state=sweep_state,
-                quality=quality,
+                quality=prob.score,
                 challenge_ok=challenge_ok,
                 risk_usd=risk_usd,
                 reward_usd_tp1=reward_usd_tp1,
                 reward_usd_tp2=reward_usd_tp2,
                 lot_size=lot_size,
+                probability=prob.score,
+                prob_tier=prob.tier,
+                prob_summary=prob.summary,
+                prob_factors=factor_lines,
             )
         )
 
-    # Sort: challenge-fit + actionable pullback path first, then reclaim, avoid last
+    # Sort: high-prob + challenge-fit + actionable path first
     rank = {"A+": 0, "A": 1, "B": 2}
     status_rank = {
         "WAIT_FOR_TRIGGER": 0,
@@ -1199,6 +1258,8 @@ def build_manual_scan(
             below = 0 if c.focus_price >= market_mid else 1
         return (
             0 if c.challenge_ok else 1,
+            0 if c.probability >= min_focus_prob else 1,
+            -c.probability,
             rank.get(c.grade, 9),
             status_rank.get(c.status, 9),
             below,
@@ -1254,7 +1315,17 @@ def build_manual_scan(
         in ("WAIT_FOR_TRIGGER", "READY_TO_WATCH", "WAIT_FOR_RECLAIM", "WAIT_FOR_ZONE")
         and c.grade in ("A+", "A")
         and c.challenge_ok
+        and c.probability >= min_focus_prob
     ]
+    if not focus_cards:
+        focus_cards = [
+            c
+            for c in (buy if stance == "LONG_BIAS" else sell if stance == "SHORT_BIAS" else cards)
+            if c.status
+            in ("WAIT_FOR_TRIGGER", "READY_TO_WATCH", "WAIT_FOR_RECLAIM", "WAIT_FOR_ZONE")
+            and c.grade in ("A+", "A")
+            and c.challenge_ok
+        ]
     if not focus_cards:
         focus_cards = [
             c
@@ -1267,7 +1338,8 @@ def build_manual_scan(
         f0 = focus_cards[0]
         watchlist.insert(
             0,
-            f"FOCUS NOW: [{f0.grade}] {f0.side} {f0.zone_low:.2f}-{f0.zone_high:.2f} — {f0.status}",
+            f"FOCUS NOW: [{f0.grade}] {f0.side} {f0.zone_low:.2f}-{f0.zone_high:.2f} "
+            f"PROB={f0.probability:.0f}({f0.prob_tier}) — {f0.status}",
         )
 
     do_not = [
@@ -1276,7 +1348,7 @@ def build_manual_scan(
         "Do NOT fight H1 bias on full-size entries just because board leans the other way",
         "Do NOT force A/A+ longs when board shows SELL_LEAN near major resistance",
         "Do NOT treat WAIT_FOR_RECLAIM zones above/below mid as immediate dip entries",
-        "Challenge plan: 0.1 lot only — skip [WIDE ZONE] cards; risk≈$50 → TP1≈$100 / TP2≈$150",
+        "Challenge plan: 0.1 lot = $10/$1 move — risk≈$50 (~$5 SL) → TP1≈$100 / TP2≈$150",
     ]
     if news_status == "Avoid Trading Today" or bool((narrative.extras or {}).get("news_block")):
         do_not.insert(0, f"Do NOT trade through news block — {news_detail or news_status}")
@@ -1322,23 +1394,102 @@ def build_manual_scan(
             "BOARD: buy pressure > sell — bounce risk; skip forcing shorts",
         )
 
-    # Recompute quality with real board lean, then build FOCUS plan
+    # Recompute multi-factor probability with real board lean, then FOCUS
     for c in cards:
-        if c.side == "BUY":
-            pd_ok = pd_zone in ("discount", "equilibrium", "")
-            board_ok = side_compare.lean != "SELL_LEAN"
-        else:
-            pd_ok = pd_zone in ("premium", "equilibrium", "")
-            board_ok = side_compare.lean != "BUY_LEAN"
-        c.quality = _card_quality(
-            c.grade,
-            killzone,
-            pd_ok,
-            board_ok or c.status == "AVOID_NOW",
-            c.reward_risk,
-            c.sweep_state,
-            agree_stack,
+        area_proxy = TradeArea(
+            side=c.side,
+            kind=c.kind,
+            price_low=c.zone_low,
+            price_high=c.zone_high,
+            mid_price=c.focus_price,
+            score=c.score,
+            distance_atr=c.distance_atr,
+            fresh_unfilled=True,
+            reasons=list(c.reasons),
+            label=c.kind,
         )
+        prob = score_setup_probability(
+            area_proxy,
+            narrative=narrative,
+            h1_bias=h1_bias,
+            h4_bias=h4_bias,
+            m15_bias=m15_bias,
+            session_name=session_name,
+            sweep_state=c.sweep_state,
+            reward_risk=c.reward_risk,
+            challenge_ok=c.challenge_ok,
+            playbooks=playbooks,
+            board_lean=side_compare.lean,
+            against_htf=c.status == "AVOID_NOW",
+        )
+        c.probability = prob.score
+        c.prob_tier = prob.tier
+        c.prob_summary = prob.summary
+        c.quality = prob.score
+        c.prob_factors = [
+            f"{'+' if f.passed else '-'} {f.name} ({f.points:.0f}/{f.max_points:.0f}) {f.detail}"
+            for f in sorted(prob.factors, key=lambda x: -x.points)[:6]
+        ]
+        c.grade = grade_from_probability(c.grade, c.status, prob, c.challenge_ok)
+
+    # Re-sort buy/sell after probability refresh
+    cards.sort(key=_path_key)
+    buy = [c for c in cards if c.side == "BUY"][:5]
+    sell = [c for c in cards if c.side == "SELL"][:5]
+
+    # Refresh FOCUS NOW line with final probability
+    watchlist = [w for w in watchlist if not str(w).startswith("FOCUS NOW:")]
+    focus_cards = [
+        c
+        for c in (buy if stance == "LONG_BIAS" else sell if stance == "SHORT_BIAS" else cards)
+        if c.status
+        in ("WAIT_FOR_TRIGGER", "READY_TO_WATCH", "WAIT_FOR_RECLAIM", "WAIT_FOR_ZONE")
+        and c.grade in ("A+", "A")
+        and c.challenge_ok
+        and c.probability >= min_focus_prob
+    ]
+    if not focus_cards:
+        focus_cards = [
+            c
+            for c in (buy if stance == "LONG_BIAS" else sell if stance == "SHORT_BIAS" else cards)
+            if c.status
+            in ("WAIT_FOR_TRIGGER", "READY_TO_WATCH", "WAIT_FOR_RECLAIM", "WAIT_FOR_ZONE")
+            and c.grade in ("A+", "A")
+            and c.challenge_ok
+        ]
+    if focus_cards:
+        f0 = focus_cards[0]
+        watchlist.insert(
+            0,
+            f"FOCUS NOW: [{f0.grade}] {f0.side} {f0.zone_low:.2f}-{f0.zone_high:.2f} "
+            f"PROB={f0.probability:.0f}({f0.prob_tier}) — {f0.status}",
+        )
+
+    # Refresh summary best grades after rescore
+    a_plus = sum(1 for c in cards if c.grade == "A+")
+    a_cnt = sum(1 for c in cards if c.grade == "A")
+    if buy and sell:
+        core_sum = (
+            f"stance={stance} A+={a_plus} A={a_cnt} | "
+            f"best BUY @{buy[0].focus_price:.2f}[{buy[0].grade}/{buy[0].prob_tier}{buy[0].probability:.0f}] | "
+            f"best SELL @{sell[0].focus_price:.2f}[{sell[0].grade}/{sell[0].prob_tier}{sell[0].probability:.0f}]"
+        )
+    elif buy:
+        core_sum = (
+            f"stance={stance} A+={a_plus} A={a_cnt} | "
+            f"best BUY @{buy[0].focus_price:.2f}[{buy[0].grade}/{buy[0].prob_tier}{buy[0].probability:.0f}]"
+        )
+    elif sell:
+        core_sum = (
+            f"stance={stance} A+={a_plus} A={a_cnt} | "
+            f"best SELL @{sell[0].focus_price:.2f}[{sell[0].grade}/{sell[0].prob_tier}{sell[0].probability:.0f}]"
+        )
+    else:
+        core_sum = f"stance={stance} cards={len(cards)} A+={a_plus} A={a_cnt}"
+    summary = (
+        f"{core_sum} | board={side_compare.lean} "
+        f"BUYΣ{side_compare.buy_pressure:.0f}/SELLΣ{side_compare.sell_pressure:.0f}"
+    )
 
     focus = build_focus_plan(
         cards,
@@ -1348,10 +1499,11 @@ def build_manual_scan(
         pd_zone,
         side_compare.lean,
         session_name,
+        min_probability=min_focus_prob,
     )
     if focus:
         summary = (
-            f"{summary} | FOCUS={focus.verdict} Q={focus.quality:.0f} "
+            f"{summary} | FOCUS={focus.verdict} PROB={focus.quality:.0f} "
             f"{focus.side}@{focus.entry:.2f}"
         )
 
@@ -1394,7 +1546,7 @@ def render_manual_scan_block(
         lines.append("-" * 72)
         lines.append("  FOCUS TRADE  (one idea — confirm on TradingView)")
         lines.append(
-            f"  Verdict={fp.verdict}  Quality={fp.quality:.0f}/100  "
+            f"  Verdict={fp.verdict}  PROB={fp.quality:.0f}/100  "
             f"[{fp.grade}] {fp.side} {fp.kind}  sweep={fp.sweep_state}"
         )
         lines.append(
@@ -1476,7 +1628,8 @@ def render_manual_scan_block(
             lines.append(
                 f"  {i}. [{c.grade}] {c.side}  {lo:.2f}-{hi:.2f}  "
                 f"@{c.focus_price:.2f}  {c.kind}  score={c.score:.0f}  "
-                f"Q={c.quality:.0f}  dist={c.distance_atr:.2f}ATR  "
+                f"PROB={c.probability:.0f}({c.prob_tier})  "
+                f"dist={c.distance_atr:.2f}ATR  "
                 f"sweep={c.sweep_state}  {c.status}"
             )
             parts = [p.strip() for p in c.if_then.split("|")]
@@ -1484,9 +1637,12 @@ def render_manual_scan_block(
                 lines.append(f"      {p}")
             lines.append(f"      {c.invalidation}")
             lines.append(f"      {c.avoid}")
+            if c.prob_summary:
+                lines.append(f"      PROB : {c.prob_summary}")
             if c.stop_loss > 0 and c.take_profit_1 > 0:
                 lines.append(
                     f"      LOT  : {c.lot_size:g}  |  "
+                    f"$10 per $1 move  |  "
                     f"RISK≈${c.risk_usd:.0f}  TP1≈${c.reward_usd_tp1:.0f}  "
                     f"TP2≈${c.reward_usd_tp2:.0f}"
                     + ("" if c.challenge_ok else "  [WIDE ZONE — skip for challenge]")
@@ -1521,6 +1677,8 @@ def render_manual_scan_block(
                     lines.append(f"      TV · {t}")
                 for r in c.reasons[:2]:
                     lines.append(f"      Why · {r}")
+                for f in c.prob_factors[:4]:
+                    lines.append(f"      Fac · {f}")
             if c.status == "AVOID_NOW":
                 lines.append("      >>> DO NOT ENTER THIS SIDE (against H1 bias)")
 

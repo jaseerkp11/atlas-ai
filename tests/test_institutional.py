@@ -884,12 +884,13 @@ def test_focus_liquidity_in_zone_not_watch_ready():
 
 
 def test_challenge_sl_tp_fifty_dollar_point_one_lot():
-    """0.1 lot / $50 max → ~$5 stop; TP1/TP2 = 1:2 / 1:3 in dollars."""
+    """Broker: 0.1 lot = $10 per $1 → $50 risk = $5 stop; TP 1:2 / 1:3."""
     from atlas.institutional.config import load_institutional_config
     from atlas.institutional.manual_scanner import _plan_sl_tp, _refine_area_for_challenge
     from atlas.institutional.trade_areas import TradeArea
 
     cfg = load_institutional_config(reload=True)
+    assert abs(cfg.challenge_px_value() - 10.0) < 1e-6
     assert abs(cfg.challenge_max_risk_points() - 5.0) < 1e-6
     buy = TradeArea("BUY", "support", 4148.5, 4151.5, 4150.0, 90, 0.3, True, ["S"], "S")
     entry, sl, tp1, tp2, *_rest, ok, risk_usd, rew1, rew2 = _plan_sl_tp(
@@ -925,3 +926,94 @@ def test_challenge_width_boost_prefers_tight_zones():
     assert _challenge_width_boost(2.5, atr=8.0, max_risk_pts=5.0) > _challenge_width_boost(
         20.0, atr=8.0, max_risk_pts=5.0
     )
+
+
+def test_setup_probability_stacks_chart_factors():
+    from datetime import datetime, timezone
+
+    from atlas.institutional.models import Bias, MarketNarrative, ModuleScore
+    from atlas.institutional.playbook_engine import PlaybookHit, PlaybookResult
+    from atlas.institutional.setup_probability import grade_from_probability, score_setup_probability
+    from atlas.institutional.trade_areas import TradeArea
+
+    area = TradeArea(
+        "BUY",
+        "bullish_fvg",
+        4148,
+        4151,
+        4149.5,
+        92,
+        0.4,
+        True,
+        ["Unfilled bullish FVG", "+ overlap htf_support"],
+        "FVG",
+    )
+    narr = MarketNarrative(
+        symbol="XAUUSD",
+        as_of=datetime.now(timezone.utc),
+        overall_bias=Bias.BULLISH,
+        htf_bias=Bias.BULLISH,
+        mtf_bias=Bias.BULLISH,
+        structure_summary="BOS",
+        liquidity_summary="ok",
+        institutional_confluence="ok",
+        sr_summary="ok",
+        trend_quality="Trending",
+        volatility_regime="normal",
+        best_session="London",
+        news_status="Trade Today",
+        module_scores=[
+            ModuleScore("market_structure", 75, 14, Bias.BULLISH, "BOS", True),
+            ModuleScore("liquidity", 70, 10, Bias.BULLISH, "ok", True),
+            ModuleScore("price_action", 65, 8, Bias.BULLISH, "pin", True),
+        ],
+        mid=4152.0,
+        atr_m15=8.0,
+        extras={
+            "pd_zone": "discount",
+            "session_levels": {"pdl": 4149.0, "asian_low": 4148.5},
+            "trendlines": [{"kind": "support", "quality": "Strong", "price": 4149.2, "touches": 3}],
+            "news_block": False,
+        },
+    )
+    pb = PlaybookResult(
+        hits=[PlaybookHit("Sweep+Reclaim (Bullish)", Bias.BULLISH, 18.0, ["x"])],
+        best=PlaybookHit("Sweep+Reclaim (Bullish)", Bias.BULLISH, 18.0, ["x"]),
+        total_boost=18.0,
+        summary="hit",
+        unlock_hints=[],
+    )
+    high = score_setup_probability(
+        area,
+        narrative=narr,
+        h1_bias=Bias.BULLISH,
+        h4_bias=Bias.BULLISH,
+        m15_bias=Bias.BULLISH,
+        session_name="London-NY Overlap",
+        sweep_state="RECLAIMED",
+        reward_risk=2.5,
+        challenge_ok=True,
+        playbooks=pb,
+        board_lean="BUY_LEAN",
+        against_htf=False,
+    )
+    assert high.score >= 70
+    assert high.tier in ("HIGH", "ELITE")
+    assert grade_from_probability("A", "WAIT_FOR_TRIGGER", high, True) in ("A", "A+")
+
+    low = score_setup_probability(
+        area,
+        narrative=narr,
+        h1_bias=Bias.BEARISH,
+        h4_bias=Bias.BEARISH,
+        m15_bias=Bias.BEARISH,
+        session_name="Asian",
+        sweep_state="WAITING_SWEEP",
+        reward_risk=1.0,
+        challenge_ok=False,
+        playbooks=None,
+        board_lean="SELL_LEAN",
+        against_htf=True,
+    )
+    assert low.tier == "AVOID"
+    assert low.score < 50

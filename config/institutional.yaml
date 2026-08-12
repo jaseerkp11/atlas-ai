@@ -51,13 +51,17 @@ institutional:
     enabled: true
     lot_size: 0.1
     max_risk_usd: 50.0
-    # XAUUSD: ~$100 P/L per $1 price move on 1.0 lot → $10 on 0.1 lot
-    # so $50 risk ≈ $5.00 stop distance
+    # YOUR BROKER: 0.1 lot = $10 P/L per $1 price move on XAUUSD
+    # → $50 max risk = $5.00 stop | TP1 1:2 ≈ $100 | TP2 1:3 ≈ $150
+    usd_per_dollar_move_at_lot: 10.0
+    # legacy fallback if usd_per_dollar_move_at_lot omitted: per_lot * lot_size
     usd_per_price_unit_per_lot: 100.0
     min_rr_tp1: 2.0
     min_rr_tp2: 3.0
     max_zone_width_atr: 1.25
     prefer_distance_atr: 1.2
+    # Only spotlight FOCUS when multi-factor probability ≥ this
+    min_focus_probability: 70.0
 
   news:
     enabled: true
