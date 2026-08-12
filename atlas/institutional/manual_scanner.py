@@ -17,7 +17,6 @@ from dataclasses import asdict, dataclass, field
 from atlas.institutional.models import Bias, MarketNarrative
 from atlas.institutional.playbook_engine import PlaybookResult
 from atlas.institutional.setup_probability import (
-    SetupProbability,
     grade_from_probability,
     score_setup_probability,
 )
