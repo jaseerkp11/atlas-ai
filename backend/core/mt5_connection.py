@@ -1,4 +1,6 @@
-import MetaTrader5 as mt5
+"""TASK 001 compatibility wrapper — prefer `atlas.execution.mt5_client.MT5Client`."""
+
+from atlas.execution.mt5_client import MT5Client
 
 
 def connect_mt5():
@@ -6,34 +8,24 @@ def connect_mt5():
     print("ATLAS AI - MT5 Connection Test")
     print("=" * 50)
 
-    if not mt5.initialize():
-        print("❌ Failed to initialize MT5")
-        print("Error:", mt5.last_error())
+    client = MT5Client()
+    if not client.connect():
+        print("Failed to initialize MT5 / paper client")
         return False
 
-    account = mt5.account_info()
+    account = client.account_info_dict()
+    print("\nConnected Successfully!\n")
+    print(f"Login      : {account.get('login')}")
+    print(f"Server     : {account.get('server')}")
+    print(f"Name       : {account.get('name')}")
+    print(f"Balance    : {account.get('balance')}")
+    print(f"Equity     : {account.get('equity')}")
+    print(f"Leverage   : {account.get('leverage')}")
 
-    if account is None:
-        print("❌ No MT5 account connected.")
-        mt5.shutdown()
-        return False
+    from atlas.config import load_settings
 
-    print("\n✅ Connected Successfully!\n")
-
-    print(f"Login      : {account.login}")
-    print(f"Server     : {account.server}")
-    print(f"Name       : {account.name}")
-    print(f"Balance    : {account.balance}")
-    print(f"Equity     : {account.equity}")
-    print(f"Leverage   : {account.leverage}")
-    print(f"Company    : {account.company}")
-
-    symbols = mt5.symbols_get()
-
-    print(f"\nAvailable Symbols : {len(symbols)}")
-
-    mt5.shutdown()
-
+    print(f"\nConfigured Symbols : {len(load_settings().symbols)}")
+    client.disconnect()
     return True
 
 

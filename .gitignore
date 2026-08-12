@@ -1,0 +1,27 @@
+# Environment
+.env
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.egg-info/
+dist/
+build/
+
+# Runtime outputs
+logs/
+journals/
+*.log
+
+# IDE / OS
+.idea/
+.vscode/
+.DS_Store
+
+# MT5 / secrets
+*.pfx
+credentials.json
