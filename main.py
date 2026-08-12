@@ -239,9 +239,12 @@ def cmd_analyze(args: argparse.Namespace) -> int:
 
 def cmd_institutional(args: argparse.Namespace) -> int:
     """Manual scanner on each NEW M5 close — analysis only."""
+    print("Loading scanner (numpy/pandas can take 30–90s on first start)…")
+    print("Do NOT press Ctrl+C while libraries load.")
     from atlas.institutional.config import load_institutional_config
     from atlas.institutional.watch_m5 import InstitutionalWatch
 
+    print("Libraries ready. Connecting MT5…")
     cfg = load_institutional_config(reload=True)
     watch = InstitutionalWatch(cfg, execute=bool(getattr(args, "execute", False)))
     try:
