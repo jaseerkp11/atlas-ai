@@ -76,6 +76,40 @@ def _proximity_boost(dist: float) -> float:
     return -8.0
 
 
+def _challenge_width_boost(width: float, atr: float, max_risk_pts: float = 5.0) -> float:
+    """
+    Prefer tight boxes that fit a ~$50 stop at 0.1 lot (~$5 price on XAU).
+
+    Wide HTF ranges are magnets for TPs / danger, not challenge entries.
+    """
+    atr = max(float(atr), 1e-9)
+    w = abs(float(width))
+    cap = max(float(max_risk_pts), 1.5)
+    # Zone + small buffer should fit inside challenge risk
+    if w <= cap * 0.55:
+        return 14.0
+    if w <= cap * 0.85:
+        return 8.0
+    if w <= cap * 1.15:
+        return 2.0
+    if w <= atr * 1.25:
+        return -6.0
+    return -14.0
+
+
+def _challenge_max_risk_pts() -> float:
+    try:
+        from atlas.institutional.config import load_institutional_config
+
+        cfg = load_institutional_config()
+        ch = cfg.challenge or {}
+        if not ch.get("enabled", True):
+            return 1e9
+        return float(cfg.challenge_max_risk_points())
+    except Exception:
+        return 5.0
+
+
 def _htf_align_boost(side: str, overall: Bias, h1: Bias) -> float:
     bias = h1 if h1 != Bias.NEUTRAL else overall
     if bias == Bias.NEUTRAL:
@@ -114,9 +148,15 @@ def _from_zone(
     if is_imbalance and not fresh:
         return None
 
+    lo = min(float(z.bottom), float(z.top))
+    hi = max(float(z.bottom), float(z.top))
+    width = hi - lo
+    max_risk = _challenge_max_risk_pts()
+
     score = float(z.score)
     score += _proximity_boost(dist)
     score += _htf_align_boost(side, overall, h1)
+    score += _challenge_width_boost(width, atr, max_risk)
     if is_imbalance and fresh:
         score += 8.0
     if z.reactions:
@@ -136,7 +176,11 @@ def _from_zone(
         reasons.append(f"Strong support zone score={z.score:.0f}")
     elif kind == "resistance":
         reasons.append(f"Strong resistance zone score={z.score:.0f}")
-    reasons.append(f"Range {z.bottom:.2f}-{z.top:.2f} | {dist:.2f} ATR from mid")
+    reasons.append(f"Range {lo:.2f}-{hi:.2f} | {dist:.2f} ATR from mid | width={width:.2f}")
+    if width <= max_risk * 0.85:
+        reasons.append(f"Tight enough for challenge stop (~{max_risk:.1f} pts / $50 @ 0.1)")
+    elif width > max_risk * 1.15:
+        reasons.append("Wide box — refine to edge band or skip for 0.1 lot plan")
     if side == "BUY" and h1 == Bias.BULLISH:
         reasons.append("Aligned with H1 bullish bias")
     if side == "SELL" and h1 == Bias.BEARISH:
@@ -145,8 +189,8 @@ def _from_zone(
     return TradeArea(
         side=side,
         kind=kind,
-        price_low=min(float(z.bottom), float(z.top)),
-        price_high=max(float(z.bottom), float(z.top)),
+        price_low=lo,
+        price_high=hi,
         mid_price=float(center),
         score=score,
         distance_atr=dist,
@@ -178,7 +222,9 @@ def _from_liquidity(
         return None
 
     p = float(pool.price)
-    half = atr * 0.12
+    # Tight level band — challenge stops are ~$5; keep box inside that
+    max_risk = _challenge_max_risk_pts()
+    half = min(atr * 0.10, max_risk * 0.35)
     dist = _dist_atr(p, mid, atr)
     if dist > 4.5:
         return None
@@ -186,10 +232,16 @@ def _from_liquidity(
     score = float(pool.significance)
     score += _proximity_boost(dist)
     score += _htf_align_boost(side, overall, h1)
+    score += _challenge_width_boost(half * 2, atr, max_risk)
     if kind.startswith("equal_"):
         score += 6.0
     if kind.startswith("weekly_"):
         score += 5.0
+    # Session PDH/PDL/Asian are high-prob magnets for challenge plans
+    if kind in ("daily_high", "daily_low") and any(
+        x in pool.label.lower() for x in ("pdh", "pdl", "asian", "london")
+    ):
+        score += 7.0
     score = max(0.0, min(100.0, score))
 
     return TradeArea(
@@ -205,6 +257,7 @@ def _from_liquidity(
             reason0,
             pool.label,
             f"{dist:.2f} ATR from mid — watch for sweep then reclaim/reject",
+            f"Tight level band ±{half:.2f} (challenge-fit)",
         ],
         label=pool.label,
     )
@@ -274,7 +327,10 @@ def _htf_major_areas(
                 continue
             kept_local.append((kind_hl, price, label, sc))
 
-        half = atr * (0.18 if tf == "H4" else 0.12)
+        half = min(
+            atr * (0.14 if tf == "H4" else 0.10),
+            _challenge_max_risk_pts() * 0.35,
+        )
         for kind_hl, price, label, sc in kept_local:
             dist = _dist_atr(price, mid, atr)
             if dist > max_dist:
@@ -282,6 +338,7 @@ def _htf_major_areas(
             side = "SELL" if kind_hl == "high" else "BUY"
             area_kind = "htf_resistance" if kind_hl == "high" else "htf_support"
             score = sc + _proximity_boost(dist) + _htf_align_boost(side, overall, h1)
+            score += _challenge_width_boost(half * 2, atr, _challenge_max_risk_pts())
             # HTF majors stay useful as targets even against bias (don't crush score)
             if side == "SELL" and h1 == Bias.BULLISH:
                 score += 8.0  # undo most of against-bias penalty — still a magnet
@@ -460,7 +517,16 @@ def build_trade_areas(
                 # Keep higher score; merge reason if different kind
                 if a.kind not in k.kind and a.score >= k.score - 5:
                     k.reasons.append(f"+ overlap {a.kind} ({a.label})")
-                    k.score = min(100.0, k.score + 3.0)
+                    k.score = min(100.0, k.score + 5.0)  # confluence boost
+                    # Prefer the tighter band around the shared mid (challenge-friendly)
+                    tight_half = min(
+                        abs(k.price_high - k.price_low) / 2.0,
+                        abs(a.price_high - a.price_low) / 2.0,
+                        atr * 0.12,
+                        _challenge_max_risk_pts() * 0.35,
+                    )
+                    k.price_low = k.mid_price - tight_half
+                    k.price_high = k.mid_price + tight_half
                     # Promote to HTF kind when a major overlaps a weaker zone
                     if a.kind.startswith("htf_") and not k.kind.startswith("htf_"):
                         k.kind = a.kind
@@ -470,12 +536,21 @@ def build_trade_areas(
         if not clash:
             kept.append(a)
 
-    buy = [a for a in kept if a.side == "BUY"][:max_per_side]
-    sell = [a for a in kept if a.side == "SELL"][:max_per_side]
-    top = sorted(buy + sell, key=lambda x: -x.score)
+    max_risk = _challenge_max_risk_pts()
+
+    def _rank_side(a: TradeArea) -> tuple:
+        width = abs(a.price_high - a.price_low)
+        fit = 0 if width <= max_risk * 0.95 else (1 if width <= max_risk * 1.4 else 2)
+        near = 0 if a.distance_atr <= 1.2 else (1 if a.distance_atr <= 2.5 else 2)
+        return (fit, near, -a.score, a.distance_atr)
+
+    buy = sorted([a for a in kept if a.side == "BUY"], key=_rank_side)[:max_per_side]
+    sell = sorted([a for a in kept if a.side == "SELL"], key=_rank_side)[:max_per_side]
+    top = sorted(buy + sell, key=_rank_side)
 
     summary = (
         f"areas={len(top)} buy={len(buy)} sell={len(sell)} "
+        f"challenge_fit≈{max_risk:.1f}pts | "
         f"best={' / '.join(f'{a.side}@{a.mid_price:.2f}({a.score:.0f})' for a in top[:3]) or 'none'}"
     )
     return TradeAreasReport(top, buy, sell, summary)

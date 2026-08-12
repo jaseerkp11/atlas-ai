@@ -33,6 +33,7 @@ class InstitutionalConfig:
     news: dict[str, Any]
     analysis: dict[str, Any]
     log_dir: str
+    challenge: dict[str, Any]
 
     @property
     def is_live(self) -> bool:
@@ -41,6 +42,16 @@ class InstitutionalConfig:
     @property
     def is_paper(self) -> bool:
         return self.mode.upper() == "PAPER"
+
+    def challenge_max_risk_points(self) -> float:
+        """Price distance ($) for max_risk_usd at configured lot size."""
+        ch = self.challenge or {}
+        if not ch.get("enabled", True):
+            return 1e9
+        lot = max(float(ch.get("lot_size", 0.1)), 1e-9)
+        max_usd = float(ch.get("max_risk_usd", 50.0))
+        per_lot = max(float(ch.get("usd_per_price_unit_per_lot", 100.0)), 1e-9)
+        return max_usd / (per_lot * lot)
 
 
 _CFG: InstitutionalConfig | None = None
@@ -73,5 +84,6 @@ def load_institutional_config(reload: bool = False) -> InstitutionalConfig:
         news=dict(t["news"]),
         analysis=dict(t["analysis"]),
         log_dir=str(t["logging"]["dir"]),
+        challenge=dict(t.get("challenge") or {}),
     )
     return _CFG

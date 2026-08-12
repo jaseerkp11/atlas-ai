@@ -626,8 +626,8 @@ def test_plan_sl_tp_prop_rr_two_and_three():
     far = TradeArea(
         "SELL", "resistance", 4168, 4170, 4169, 90, 2.0, True, ["R"], "R"
     )
-    entry, sl, tp1, tp2, sl_l, tp1_l, tp2_l, rr1, rr2, risk, reward, note = _plan_sl_tp(
-        buy, [buy, near, far], atr=8.0
+    entry, sl, tp1, tp2, sl_l, tp1_l, tp2_l, rr1, rr2, risk, reward, note, ok, ru, r1, r2 = _plan_sl_tp(
+        buy, [buy, near, far], atr=8.0, max_risk_points=5.0, lot_size=0.1
     )
     assert entry == 4150.0
     assert sl < entry
@@ -881,3 +881,47 @@ def test_focus_liquidity_in_zone_not_watch_ready():
     assert rep.buy_cards[0].sweep_state == "IN_ZONE"
     assert rep.focus is not None
     assert rep.focus.verdict == "WAIT_SWEEP"
+
+
+def test_challenge_sl_tp_fifty_dollar_point_one_lot():
+    """0.1 lot / $50 max → ~$5 stop; TP1/TP2 = 1:2 / 1:3 in dollars."""
+    from atlas.institutional.config import load_institutional_config
+    from atlas.institutional.manual_scanner import _plan_sl_tp, _refine_area_for_challenge
+    from atlas.institutional.trade_areas import TradeArea
+
+    cfg = load_institutional_config(reload=True)
+    assert abs(cfg.challenge_max_risk_points() - 5.0) < 1e-6
+    buy = TradeArea("BUY", "support", 4148.5, 4151.5, 4150.0, 90, 0.3, True, ["S"], "S")
+    entry, sl, tp1, tp2, *_rest, ok, risk_usd, rew1, rew2 = _plan_sl_tp(
+        buy, [buy], atr=8.0, max_risk_points=5.0, lot_size=0.1, usd_per_price_unit_per_lot=100.0
+    )
+    risk = entry - sl
+    assert risk <= 5.05
+    assert ok is True
+    assert risk_usd <= 50.5
+    assert abs(rew1 / risk_usd - 2.0) < 0.15
+    assert abs(rew2 / risk_usd - 3.0) < 0.2
+    # Wide zone should fail challenge_ok without refine
+    wide = TradeArea("BUY", "support", 4130.0, 4150.0, 4140.0, 85, 1.0, True, ["W"], "W")
+    *_, ok2, risk_usd2, _, _ = _plan_sl_tp(
+        wide, [wide], atr=8.0, max_risk_points=5.0, lot_size=0.1
+    )
+    assert ok2 is False
+    assert risk_usd2 <= 50.5
+    # Refine shrinks to upper edge → structural SL can fit challenge
+    refined = _refine_area_for_challenge(wide, 5.0, atr=8.0)
+    assert (refined.price_high - refined.price_low) < (wide.price_high - wide.price_low)
+    assert refined.price_high == wide.price_high
+    *_, ok3, risk_usd3, _, _ = _plan_sl_tp(
+        refined, [refined], atr=8.0, max_risk_points=5.0, lot_size=0.1
+    )
+    assert ok3 is True
+    assert risk_usd3 <= 50.5
+
+
+def test_challenge_width_boost_prefers_tight_zones():
+    from atlas.institutional.trade_areas import _challenge_width_boost
+
+    assert _challenge_width_boost(2.5, atr=8.0, max_risk_pts=5.0) > _challenge_width_boost(
+        20.0, atr=8.0, max_risk_pts=5.0
+    )

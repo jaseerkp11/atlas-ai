@@ -51,6 +51,11 @@ class SetupCard:
     # SMC sequence relative to this zone
     sweep_state: str = "WAITING_SWEEP"  # WAITING_SWEEP | SWEPT | RECLAIMED | IN_ZONE
     quality: float = 0.0  # 0–100 checklist-style quality
+    challenge_ok: bool = True
+    risk_usd: float = 0.0
+    reward_usd_tp1: float = 0.0
+    reward_usd_tp2: float = 0.0
+    lot_size: float = 0.1
 
     def as_dict(self) -> dict:
         return asdict(self)
@@ -524,28 +529,79 @@ def _if_then(area: TradeArea, market_mid: float) -> tuple[str, list[str], str, s
     )
 
 
+def _refine_area_for_challenge(
+    area: TradeArea,
+    max_risk_points: float,
+    atr: float,
+) -> TradeArea:
+    """
+    If a zone is wider than the challenge stop, shrink to the reactive edge band.
+
+    BUY  → upper portion of demand (defend after low sweep)
+    SELL → lower portion of supply (reject after high sweep)
+    Keeps original mid as fallback only when already tight.
+    """
+    lo = min(float(area.price_low), float(area.price_high))
+    hi = max(float(area.price_low), float(area.price_high))
+    width = hi - lo
+    cap = max(float(max_risk_points), 1.5)
+    # Leave room for buffer under the $50 risk
+    target_width = min(cap * 0.70, max(atr * 0.35, 2.0))
+    if width <= cap * 0.95:
+        return area
+
+    if area.side == "BUY":
+        new_hi = hi
+        new_lo = max(lo, hi - target_width)
+    else:
+        new_lo = lo
+        new_hi = min(hi, lo + target_width)
+    new_mid = (new_lo + new_hi) / 2.0
+    reasons = list(area.reasons)
+    reasons.insert(
+        0,
+        f"Refined wide {width:.2f}→{new_hi-new_lo:.2f} edge band for 0.1 lot / $50 stop",
+    )
+    return TradeArea(
+        side=area.side,
+        kind=area.kind,
+        price_low=new_lo,
+        price_high=new_hi,
+        mid_price=new_mid,
+        score=area.score,
+        distance_atr=area.distance_atr,
+        fresh_unfilled=area.fresh_unfilled,
+        reasons=reasons,
+        label=area.label,
+    )
+
+
 def _plan_sl_tp(
     area: TradeArea,
     all_areas: list[TradeArea],
     atr: float,
     min_rr_tp1: float = 2.0,
     min_rr_tp2: float = 3.0,
-) -> tuple[float, float, float, float, str, str, str, float, float, float, float, str]:
+    max_risk_points: float | None = None,
+    lot_size: float = 0.1,
+    usd_per_price_unit_per_lot: float = 100.0,
+) -> tuple[
+    float, float, float, float, str, str, str, float, float, float, float, str, bool, float, float, float
+]:
     """
-    Prop-style risk map for challenge accounts (target 1:2 / 1:3).
+    Challenge risk map: 0.1 lot / ~$50 max loss → fixed risk distance, TP 1:2 / 1:3.
 
     Returns:
       entry, sl, tp1, tp2, sl_label, tp1_label, tp2_label,
-      rr1, rr2, risk_pts, reward_pts, magnet_note
-
-    SL = beyond the trade zone (+ ATR buffer).
-    TP1/TP2 = structural 2R / 3R from planned entry (zone mid).
-    Opposing magnets may SNAP a TP only if they still meet min R:R;
-    nearer magnets that would crush R:R are noted as partials only.
+      rr1, rr2, risk_pts, reward_pts, magnet_note,
+      challenge_ok, risk_usd, reward_usd_tp1, reward_usd_tp2
     """
     atr = max(float(atr), 1e-9)
     lo, hi, focus = float(area.price_low), float(area.price_high), float(area.mid_price)
-    buffer = max(atr * 0.20, abs(hi - lo) * 0.15)
+    width = abs(hi - lo)
+    # Tight buffer — challenge stops are small (~$5 on XAU 0.1 lot)
+    buffer = min(max(atr * 0.12, width * 0.10), 1.0)
+    px_value = max(float(usd_per_price_unit_per_lot) * max(float(lot_size), 1e-9), 1e-9)
 
     def _rr(entry: float, sl: float, tp: float, side: str) -> float:
         if side == "BUY":
@@ -558,119 +614,134 @@ def _plan_sl_tp(
             return 0.0
         return round(reward / risk, 2)
 
+    def _usd(pts: float) -> float:
+        return round(abs(pts) * px_value, 2)
+
+    # Challenge risk cap (default $5 price = $50 @ 0.1 lot)
+    if max_risk_points is None or max_risk_points <= 0:
+        max_risk_points = 5.0
+    max_risk_points = float(max_risk_points)
+    # Floor so gold noise does not make absurdly tiny stops
+    min_risk = max(1.5, atr * 0.15)
+
     side = area.side
     entry = focus
+    challenge_ok = True
+    magnet_note = ""
+
     if side == "BUY":
-        sl = lo - buffer
-        sl_label = f"below buy zone {lo:.2f} (−{buffer:.2f})"
-        risk = max(entry - sl, atr * 0.25)
-        # Re-anchor SL if zone was tiny so risk stays meaningful
-        sl = entry - risk
+        struct_sl = lo - buffer
+        struct_risk = max(entry - struct_sl, min_risk)
+        if struct_risk <= max_risk_points * 1.05:
+            risk = max(struct_risk, min_risk)
+            sl = entry - risk
+            sl_label = f"below zone {lo:.2f} (struct, risk={risk:.2f}≈${_usd(risk):.0f})"
+        else:
+            # Zone too wide for $50 @ 0.1 lot — cap risk, mark unfit for FOCUS
+            risk = max_risk_points
+            sl = entry - risk
+            challenge_ok = False
+            sl_label = (
+                f"challenge cap −{risk:.2f} (${_usd(risk):.0f} @ {lot_size} lot) "
+                f"— zone wider than stop"
+            )
+            magnet_note = (
+                f"Zone risk {struct_risk:.2f} > challenge max {max_risk_points:.2f} — "
+                "prefer tighter area"
+            )
         struct_tp1 = entry + min_rr_tp1 * risk
         struct_tp2 = entry + min_rr_tp2 * risk
         magnets = sorted(
-            [
-                a
-                for a in all_areas
-                if a.side == "SELL" and a.mid_price > entry + risk * 0.5
-            ],
+            [a for a in all_areas if a.side == "SELL" and a.mid_price > entry + risk * 0.5],
             key=lambda a: a.mid_price,
         )
-        tp1, tp1_label = struct_tp1, f"prop 1:{min_rr_tp1:g} @{struct_tp1:.2f}"
-        tp2, tp2_label = struct_tp2, f"prop 1:{min_rr_tp2:g} @{struct_tp2:.2f}"
-        magnet_note = ""
-        # Snap TP1 only to magnets near the 2R band (not far 3R+ magnets)
+        tp1, tp1_label = struct_tp1, f"1:{min_rr_tp1:g} (+${_usd(min_rr_tp1 * risk):.0f}) @{struct_tp1:.2f}"
+        tp2, tp2_label = struct_tp2, f"1:{min_rr_tp2:g} (+${_usd(min_rr_tp2 * risk):.0f}) @{struct_tp2:.2f}"
         for m in magnets:
             m_rr = _rr(entry, sl, float(m.mid_price), "BUY")
             if min_rr_tp1 <= m_rr <= min_rr_tp1 + 0.75:
                 tp1 = float(m.mid_price)
-                tp1_label = f"{m.kind} @{tp1:.2f} (~1:{m_rr:g}, score={m.score:.0f})"
+                tp1_label = f"{m.kind} @{tp1:.2f} (~1:{m_rr:g}, +${_usd(tp1-entry):.0f})"
                 break
         for m in magnets:
             m_rr = _rr(entry, sl, float(m.mid_price), "BUY")
             if m_rr + 1e-9 >= min_rr_tp2 and float(m.mid_price) > tp1:
                 tp2 = float(m.mid_price)
-                tp2_label = f"{m.kind} @{tp2:.2f} (≥1:{min_rr_tp2:g}, score={m.score:.0f})"
+                tp2_label = f"{m.kind} @{tp2:.2f} (≥1:{min_rr_tp2:g}, +${_usd(tp2-entry):.0f})"
                 break
         early = [a for a in magnets if float(a.mid_price) < entry + min_rr_tp1 * risk * 0.95]
-        if early:
+        if early and not magnet_note:
             e0 = early[0]
             magnet_note = (
-                f"Partial/danger before 2R: {e0.kind} @{e0.mid_price:.2f} "
-                f"(do not treat as full TP1)"
+                f"Partial before 2R: {e0.kind} @{e0.mid_price:.2f} (scale out only)"
             )
         if tp2 <= tp1:
             tp2 = max(entry + min_rr_tp2 * risk, tp1 + risk * 0.5)
-            tp2_label = f"prop ≥1:{min_rr_tp2:g} @{tp2:.2f}"
+            tp2_label = f"1:{min_rr_tp2:g} (+${_usd(tp2-entry):.0f}) @{tp2:.2f}"
         rr1 = _rr(entry, sl, tp1, "BUY")
         rr2 = _rr(entry, sl, tp2, "BUY")
         return (
-            entry,
-            sl,
-            tp1,
-            tp2,
-            sl_label,
-            tp1_label,
-            tp2_label,
-            rr1,
-            rr2,
-            round(risk, 2),
-            round(tp1 - entry, 2),
-            magnet_note,
+            entry, sl, tp1, tp2, sl_label, tp1_label, tp2_label,
+            rr1, rr2, round(risk, 2), round(tp1 - entry, 2), magnet_note,
+            challenge_ok, _usd(risk), _usd(tp1 - entry), _usd(tp2 - entry),
         )
 
     # SELL
-    sl = hi + buffer
-    sl_label = f"above sell zone {hi:.2f} (+{buffer:.2f})"
-    risk = max(sl - entry, atr * 0.25)
-    sl = entry + risk
+    struct_sl = hi + buffer
+    struct_risk = max(struct_sl - entry, min_risk)
+    if struct_risk <= max_risk_points * 1.05:
+        risk = max(struct_risk, min_risk)
+        sl = entry + risk
+        sl_label = f"above zone {hi:.2f} (struct, risk={risk:.2f}≈${_usd(risk):.0f})"
+    else:
+        risk = max_risk_points
+        sl = entry + risk
+        challenge_ok = False
+        sl_label = (
+            f"challenge cap +{risk:.2f} (${_usd(risk):.0f} @ {lot_size} lot) "
+            f"— zone wider than stop"
+        )
+        magnet_note = (
+            f"Zone risk {struct_risk:.2f} > challenge max {max_risk_points:.2f} — "
+            "prefer tighter area"
+        )
     struct_tp1 = entry - min_rr_tp1 * risk
     struct_tp2 = entry - min_rr_tp2 * risk
     magnets = sorted(
         [a for a in all_areas if a.side == "BUY" and a.mid_price < entry - risk * 0.5],
         key=lambda a: -a.mid_price,
     )
-    tp1, tp1_label = struct_tp1, f"prop 1:{min_rr_tp1:g} @{struct_tp1:.2f}"
-    tp2, tp2_label = struct_tp2, f"prop 1:{min_rr_tp2:g} @{struct_tp2:.2f}"
-    magnet_note = ""
+    tp1, tp1_label = struct_tp1, f"1:{min_rr_tp1:g} (+${_usd(min_rr_tp1 * risk):.0f}) @{struct_tp1:.2f}"
+    tp2, tp2_label = struct_tp2, f"1:{min_rr_tp2:g} (+${_usd(min_rr_tp2 * risk):.0f}) @{struct_tp2:.2f}"
     for m in magnets:
         m_rr = _rr(entry, sl, float(m.mid_price), "SELL")
         if min_rr_tp1 <= m_rr <= min_rr_tp1 + 0.75:
             tp1 = float(m.mid_price)
-            tp1_label = f"{m.kind} @{tp1:.2f} (~1:{m_rr:g}, score={m.score:.0f})"
+            tp1_label = f"{m.kind} @{tp1:.2f} (~1:{m_rr:g}, +${_usd(entry-tp1):.0f})"
             break
     for m in magnets:
         m_rr = _rr(entry, sl, float(m.mid_price), "SELL")
         if m_rr + 1e-9 >= min_rr_tp2 and float(m.mid_price) < tp1:
             tp2 = float(m.mid_price)
-            tp2_label = f"{m.kind} @{tp2:.2f} (≥1:{min_rr_tp2:g}, score={m.score:.0f})"
+            tp2_label = f"{m.kind} @{tp2:.2f} (≥1:{min_rr_tp2:g}, +${_usd(entry-tp2):.0f})"
             break
     early = [a for a in magnets if float(a.mid_price) > entry - min_rr_tp1 * risk * 0.95]
-    if early:
+    if early and not magnet_note:
         e0 = early[0]
         magnet_note = (
-            f"Partial/danger before 2R: {e0.kind} @{e0.mid_price:.2f} "
-            f"(do not treat as full TP1)"
+            f"Partial before 2R: {e0.kind} @{e0.mid_price:.2f} (scale out only)"
         )
     if tp2 >= tp1:
         tp2 = min(entry - min_rr_tp2 * risk, tp1 - risk * 0.5)
-        tp2_label = f"prop ≥1:{min_rr_tp2:g} @{tp2:.2f}"
+        tp2_label = f"1:{min_rr_tp2:g} (+${_usd(entry-tp2):.0f}) @{tp2:.2f}"
     rr1 = _rr(entry, sl, tp1, "SELL")
     rr2 = _rr(entry, sl, tp2, "SELL")
     return (
-        entry,
-        sl,
-        tp1,
-        tp2,
-        sl_label,
-        tp1_label,
-        tp2_label,
-        rr1,
-        rr2,
-        round(risk, 2),
-        round(entry - tp1, 2),
-        magnet_note,
+        entry, sl, tp1, tp2, sl_label, tp1_label, tp2_label,
+        rr1, rr2, round(risk, 2), round(entry - tp1, 2), magnet_note,
+        challenge_ok, _usd(risk), _usd(entry - tp1), _usd(entry - tp2),
     )
+
 
 
 def _sweep_state_for_area(
@@ -768,6 +839,7 @@ def build_focus_plan(
         c
         for c in cards
         if c.status != "AVOID_NOW"
+        and c.challenge_ok
         and (
             (stance == "LONG_BIAS" and c.side == "BUY")
             or (stance == "SHORT_BIAS" and c.side == "SELL")
@@ -776,8 +848,28 @@ def build_focus_plan(
         and c.grade in ("A+", "A", "B")
     ]
     if not pool:
+        # Fall back without challenge_ok so user still sees a map
+        pool = [
+            c
+            for c in cards
+            if c.status != "AVOID_NOW"
+            and (
+                (stance == "LONG_BIAS" and c.side == "BUY")
+                or (stance == "SHORT_BIAS" and c.side == "SELL")
+                or stance == "NO_EDGE"
+            )
+            and c.grade in ("A+", "A", "B")
+        ]
+    if not pool:
         return None
-    pool.sort(key=lambda c: (-c.quality, {"A+": 0, "A": 1, "B": 2}.get(c.grade, 9), c.distance_atr))
+    pool.sort(
+        key=lambda c: (
+            0 if c.challenge_ok else 1,
+            -c.quality,
+            {"A+": 0, "A": 1, "B": 2}.get(c.grade, 9),
+            c.distance_atr,
+        )
+    )
     c = pool[0]
 
     bias_ok = (c.side == "BUY" and h1_bias == Bias.BULLISH) or (
@@ -815,6 +907,11 @@ def build_focus_plan(
         FocusChecklistItem("Board not fighting", board_ok, board_detail),
         FocusChecklistItem("R:R ≥ 1:2 to TP1", rr_ok, f"R:R=1:{c.reward_risk:.2f}"),
         FocusChecklistItem(
+            "Challenge risk fit",
+            c.challenge_ok,
+            f"0.1 lot risk≈${c.risk_usd:.0f} (max $50) | TP1≈${c.reward_usd_tp1:.0f} TP2≈${c.reward_usd_tp2:.0f}",
+        ),
+        FocusChecklistItem(
             "Sweep/reclaim state",
             sweep_ok,
             (
@@ -827,12 +924,15 @@ def build_focus_plan(
             ),
         ),
     ]
-    core = [checklist[0], checklist[1], checklist[3], checklist[4]]
+    core = [checklist[0], checklist[1], checklist[3], checklist[4], checklist[5]]
     core_pass = all(i.passed for i in core)
 
     if not bias_ok or not rr_ok:
         verdict = "SKIP"
         why = "Fail core filter (bias or R:R) — map only, do not take."
+    elif not c.challenge_ok:
+        verdict = "SKIP"
+        why = "Zone too wide for $50 / 0.1 lot plan — wait for a tighter area."
     elif not core_pass:
         verdict = "SKIP"
         why = "Checklist incomplete — wait for PD/board alignment."
@@ -850,10 +950,17 @@ def build_focus_plan(
         why = "Sweep/reclaim not complete — do not enter yet."
     elif not killzone:
         verdict = "WATCH_READY"
-        why = "Checklist mostly OK but outside killzone — reduce size or wait London/NY."
+        why = (
+            f"Ready (reduce size off-killzone). Lot 0.1 | risk≈${c.risk_usd:.0f} | "
+            f"TP1≈${c.reward_usd_tp1:.0f} (1:2) | TP2≈${c.reward_usd_tp2:.0f} (1:3)."
+        )
     else:
         verdict = "WATCH_READY"
-        why = "FOCUS ready: wait CONFIRM candle on TradingView, then decide."
+        why = (
+            f"FOCUS ready @ 0.1 lot. Risk≈${c.risk_usd:.0f} → "
+            f"TP1≈${c.reward_usd_tp1:.0f} / TP2≈${c.reward_usd_tp2:.0f}. "
+            "Confirm M5 on TradingView, then decide."
+        )
 
     return FocusPlan(
         side=c.side,
@@ -883,6 +990,19 @@ def build_manual_scan(
     m15_bias: Bias,
     session_name: str,
 ) -> ManualScanReport:
+    from atlas.institutional.config import load_institutional_config
+
+    cfg = load_institutional_config()
+    ch = cfg.challenge or {}
+    ch_on = bool(ch.get("enabled", True))
+    lot_size = float(ch.get("lot_size", 0.1))
+    usd_per = float(ch.get("usd_per_price_unit_per_lot", 100.0))
+    max_risk_pts = cfg.challenge_max_risk_points() if ch_on else None
+    min_rr1 = float(ch.get("min_rr_tp1", 2.0))
+    min_rr2 = float(ch.get("min_rr_tp2", 3.0))
+    prefer_dist = float(ch.get("prefer_distance_atr", 1.2))
+    _ = float(ch.get("max_zone_width_atr", 1.25))  # reserved for future soft filter
+
     killzone = session_name in ("London", "NewYork", "London-NY Overlap")
     agree_stack = h1_bias != Bias.NEUTRAL and h1_bias == m15_bias
     market_mid = float(narrative.mid)
@@ -905,7 +1025,27 @@ def build_manual_scan(
         headline = "No clear H1 bias — map levels, stand aside until structure clarifies."
 
     cards: list[SetupCard] = []
-    areas = (trade_areas.areas if trade_areas else [])[:12]
+    raw_areas = list(trade_areas.areas if trade_areas else [])
+    # Prefer tight, near, high-score areas that fit challenge stop distance
+    def _area_rank(a: TradeArea) -> tuple:
+        width = abs(a.price_high - a.price_low)
+        risk_cap = float(max_risk_pts or 5.0)
+        # Fit = zone width can sit under challenge stop (+ small slack)
+        if width <= risk_cap * 0.85:
+            fit = 0
+        elif width <= risk_cap * 1.25:
+            fit = 1
+        else:
+            fit = 2
+        near_ok = a.distance_atr <= prefer_dist
+        return (
+            fit,
+            0 if near_ok else 1,
+            a.distance_atr,
+            -a.score,
+        )
+
+    areas = sorted(raw_areas, key=_area_rank)[:12]
     for a in areas:
         grade, status = _grade(a, h1_bias, killzone, agree_stack, market_mid)
         ift, conf, inv, avoid = _if_then(a, market_mid)
@@ -919,8 +1059,15 @@ def build_manual_scan(
         if status == "AVOID_NOW":
             ift = "SKIP ENTRY (against H1). " + ift
 
-        lo = min(a.price_low, a.price_high)
-        hi = max(a.price_low, a.price_high)
+        # Challenge: shrink wide boxes to reactive edge before SL/TP map
+        plan_area = a
+        if ch_on and max_risk_pts is not None:
+            plan_area = _refine_area_for_challenge(a, float(max_risk_pts), atr)
+            if plan_area.mid_price != a.mid_price:
+                reasons.append(plan_area.reasons[0])
+
+        lo = min(plan_area.price_low, plan_area.price_high)
+        hi = max(plan_area.price_low, plan_area.price_high)
         # Use full area list for opposing TP targets (not only first 12 slice peer)
         pool = trade_areas.areas if trade_areas else [a]
         (
@@ -936,7 +1083,20 @@ def build_manual_scan(
             risk_pts,
             reward_pts,
             magnet_note,
-        ) = _plan_sl_tp(a, pool, atr)
+            challenge_ok,
+            risk_usd,
+            reward_usd_tp1,
+            reward_usd_tp2,
+        ) = _plan_sl_tp(
+            plan_area,
+            pool,
+            atr,
+            min_rr_tp1=min_rr1,
+            min_rr_tp2=min_rr2,
+            max_risk_points=max_risk_pts,
+            lot_size=lot_size,
+            usd_per_price_unit_per_lot=usd_per,
+        )
         # Prop gate: A+ needs planned ≥1:2 to TP1
         if grade == "A+" and rr > 0 and rr < 2.0:
             grade = "A"
@@ -944,6 +1104,13 @@ def build_manual_scan(
         elif grade == "A" and rr > 0 and rr < 1.8:
             grade = "B"
             reasons.append(f"Capped A→B: R:R to TP1 only 1:{rr:.2f} (weak for challenge)")
+        if ch_on and not challenge_ok:
+            if grade == "A+":
+                grade = "A"
+            reasons.append(
+                f"Wide zone for 0.1 lot/${ch.get('max_risk_usd', 50):.0f} plan — "
+                "prefer tighter area"
+            )
         if magnet_note:
             reasons.append(magnet_note)
         sweep_bull = bool((narrative.extras or {}).get("sweep_bullish"))
@@ -959,7 +1126,7 @@ def build_manual_scan(
         except (TypeError, ValueError):
             last_high_f = None
         sweep_state = _sweep_state_for_area(
-            a,
+            plan_area,
             market_mid,
             sweep_bull,
             sweep_bear,
@@ -968,7 +1135,7 @@ def build_manual_scan(
             atr=atr,
         )
         pd_zone_now = str((narrative.extras or {}).get("pd_zone", "") or "")
-        if a.side == "BUY":
+        if plan_area.side == "BUY":
             pd_ok = pd_zone_now in ("discount", "equilibrium", "")
         else:
             pd_ok = pd_zone_now in ("premium", "equilibrium", "")
@@ -980,12 +1147,12 @@ def build_manual_scan(
         cards.append(
             SetupCard(
                 grade=grade,
-                side=a.side,
+                side=plan_area.side,
                 zone_low=lo,
                 zone_high=hi,
-                focus_price=a.mid_price,
-                kind=a.kind,
-                score=a.score,
+                focus_price=plan_area.mid_price,
+                kind=plan_area.kind,
+                score=plan_area.score,
                 status=status,
                 if_then=ift,
                 confirm_on_tv=conf,
@@ -1004,13 +1171,18 @@ def build_manual_scan(
                 risk_points=risk_pts,
                 reward_points=reward_pts,
                 magnet_note=magnet_note,
-                distance_atr=float(a.distance_atr),
+                distance_atr=float(plan_area.distance_atr),
                 sweep_state=sweep_state,
                 quality=quality,
+                challenge_ok=challenge_ok,
+                risk_usd=risk_usd,
+                reward_usd_tp1=reward_usd_tp1,
+                reward_usd_tp2=reward_usd_tp2,
+                lot_size=lot_size,
             )
         )
 
-    # Sort: actionable pullback path first, then reclaim, avoid last
+    # Sort: challenge-fit + actionable pullback path first, then reclaim, avoid last
     rank = {"A+": 0, "A": 1, "B": 2}
     status_rank = {
         "WAIT_FOR_TRIGGER": 0,
@@ -1026,6 +1198,7 @@ def build_manual_scan(
         else:
             below = 0 if c.focus_price >= market_mid else 1
         return (
+            0 if c.challenge_ok else 1,
             rank.get(c.grade, 9),
             status_rank.get(c.status, 9),
             below,
@@ -1080,7 +1253,16 @@ def build_manual_scan(
         if c.status
         in ("WAIT_FOR_TRIGGER", "READY_TO_WATCH", "WAIT_FOR_RECLAIM", "WAIT_FOR_ZONE")
         and c.grade in ("A+", "A")
+        and c.challenge_ok
     ]
+    if not focus_cards:
+        focus_cards = [
+            c
+            for c in (buy if stance == "LONG_BIAS" else sell if stance == "SHORT_BIAS" else cards)
+            if c.status
+            in ("WAIT_FOR_TRIGGER", "READY_TO_WATCH", "WAIT_FOR_RECLAIM", "WAIT_FOR_ZONE")
+            and c.grade in ("A+", "A")
+        ]
     if focus_cards:
         f0 = focus_cards[0]
         watchlist.insert(
@@ -1094,6 +1276,7 @@ def build_manual_scan(
         "Do NOT fight H1 bias on full-size entries just because board leans the other way",
         "Do NOT force A/A+ longs when board shows SELL_LEAN near major resistance",
         "Do NOT treat WAIT_FOR_RECLAIM zones above/below mid as immediate dip entries",
+        "Challenge plan: 0.1 lot only — skip [WIDE ZONE] cards; risk≈$50 → TP1≈$100 / TP2≈$150",
     ]
     if news_status == "Avoid Trading Today" or bool((narrative.extras or {}).get("news_block")):
         do_not.insert(0, f"Do NOT trade through news block — {news_detail or news_status}")
@@ -1220,6 +1403,19 @@ def render_manual_scan_block(
             f"TP1 {fp.take_profit_1:.2f}  TP2 {fp.take_profit_2:.2f}  "
             f"R:R 1:{fp.reward_risk:.2f}"
         )
+        # Pull $ plan from matching card if present
+        for c in list(report.buy_cards) + list(report.sell_cards):
+            if (
+                c.side == fp.side
+                and abs(c.entry_price - fp.entry) < 1e-6
+                and c.lot_size > 0
+            ):
+                lines.append(
+                    f"  Money  : {c.lot_size:g} lot | "
+                    f"risk≈${c.risk_usd:.0f} | "
+                    f"TP1≈${c.reward_usd_tp1:.0f} | TP2≈${c.reward_usd_tp2:.0f}"
+                )
+                break
         for item in fp.checklist:
             mark = "PASS" if item.passed else "FAIL"
             lines.append(f"    [{mark}] {item.name} — {item.detail}")
@@ -1290,6 +1486,12 @@ def render_manual_scan_block(
             lines.append(f"      {c.avoid}")
             if c.stop_loss > 0 and c.take_profit_1 > 0:
                 lines.append(
+                    f"      LOT  : {c.lot_size:g}  |  "
+                    f"RISK≈${c.risk_usd:.0f}  TP1≈${c.reward_usd_tp1:.0f}  "
+                    f"TP2≈${c.reward_usd_tp2:.0f}"
+                    + ("" if c.challenge_ok else "  [WIDE ZONE — skip for challenge]")
+                )
+                lines.append(
                     f"      ENTRY: {c.entry_price:.2f}  (zone mid — plan R:R from here)"
                 )
                 lines.append(
@@ -1310,7 +1512,7 @@ def render_manual_scan_block(
                     rr2 = f"  TP2 1:{c.reward_risk_tp2:.2f}" if c.reward_risk_tp2 > 0 else ""
                     lines.append(
                         f"      R:R  : 1:{c.reward_risk:.2f} to TP1{rr2}  "
-                        f"(prop target ≥1:2 / 1:3)"
+                        f"(challenge 1:2 / 1:3 @ 0.1 lot)"
                     )
                 if c.magnet_note:
                     lines.append(f"      NOTE : {c.magnet_note}")

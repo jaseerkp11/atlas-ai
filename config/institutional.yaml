@@ -46,6 +46,19 @@ institutional:
     atr_stop_mult: 1.2
     atr_tp_mult: 3.0
 
+  # Prop challenge manual plan (YOU place 0.1 lot — bot does not auto-trade)
+  challenge:
+    enabled: true
+    lot_size: 0.1
+    max_risk_usd: 50.0
+    # XAUUSD: ~$100 P/L per $1 price move on 1.0 lot → $10 on 0.1 lot
+    # so $50 risk ≈ $5.00 stop distance
+    usd_per_price_unit_per_lot: 100.0
+    min_rr_tp1: 2.0
+    min_rr_tp2: 3.0
+    max_zone_width_atr: 1.25
+    prefer_distance_atr: 1.2
+
   news:
     enabled: true
     block_minutes_before_high: 30
